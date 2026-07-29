@@ -1813,3 +1813,127 @@ fn table_key_value_fallback_preserves_rich_values_and_themed_labels() {
             .any(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
     }));
 }
+
+#[test]
+fn tex_display_delimiters_render_issue_32828_formula() {
+    let markdown = concat!(
+        "\\[\n",
+        "\\sigma_{\\ell,m}[i,j]\n",
+        "=\n",
+        "\\operatorname{std}_s D_{\\ell,m,s}[i,j]\n",
+        "\\]\n",
+    );
+
+    assert_snapshot!(plain_lines(&render_markdown_text(markdown)).join("\n"));
+}
+
+#[test]
+fn tex_delimiters_render_general_relativity_response() {
+    let markdown = concat!(
+        "\\[\n",
+        "\\boxed{\n",
+        "R_{\\mu\\nu}-\\frac12 Rg_{\\mu\\nu}+\\Lambda g_{\\mu\\nu}\n",
+        "=\n",
+        "\\frac{8\\pi G}{c^4}T_{\\mu\\nu}\n",
+        "}\n",
+        "\\]\n",
+        "- \\(R_{\\mu\\nu}\\) is the Ricci tensor.\n\n",
+        "\\[\n",
+        "\\boxed{\\text{matter determines spacetime curvature}}\n",
+        "\\]\n\n",
+        "\\[\n",
+        "\\boxed{\n",
+        "\\frac{d^2x^\\mu}{d\\tau^2}\n",
+        "+\n",
+        "\\Gamma^\\mu_{\\alpha\\beta}\n",
+        "\\frac{dx^\\alpha}{d\\tau}\n",
+        "\\frac{dx^\\beta}{d\\tau}=0\n",
+        "}\n",
+        "\\]\n",
+    );
+
+    assert_snapshot!(plain_lines(&render_markdown_text(markdown)).join("\n"));
+}
+
+#[test]
+fn tex_inline_delimiters_render_and_preserve_unrendered_source() {
+    let text = render_markdown_text(
+        r"Rendered \(x^2\), multiline \(\frac{a}{b}\), literal `\(z^2\)`.",
+    );
+
+    assert_eq!(
+        plain_lines(&text),
+        vec![r"Rendered x², multiline \(\frac{a}{b}\), literal \(z^2\)."],
+    );
+}
+
+#[test]
+fn tex_delimiter_normalization_does_not_touch_code_blocks() {
+    let markdown = concat!(
+        "```text\n",
+        "\\[\n",
+        "x^2\n",
+        "\\]\n",
+        "```\n\n",
+        "After $y^2$.\n",
+    );
+    let rendered = plain_lines(&render_markdown_text(markdown)).join("\n");
+
+    assert!(rendered.contains("\\[\nx^2\n\\]"));
+    assert!(rendered.contains("After y²."));
+}
+
+#[test]
+fn math_rendering_does_not_change_ordinary_text_or_code() {
+    let markdown =
+        r"Price $5 and $10; shell $HOME; command \alpha; array[i]; code `$x^2$`.";
+
+    assert_eq!(
+        plain_lines(&render_markdown_text(markdown)),
+        vec![r"Price $5 and $10; shell $HOME; command \alpha; array[i]; code $x^2$."],
+    );
+}
+
+#[test]
+fn math_in_tables_uses_single_line_or_raw_fallback() {
+    let markdown = concat!(
+        "| Inline | Display |\n",
+        "| --- | --- |\n",
+        "| $x^2$ | $$\\frac{a}{b}$$ |\n",
+    );
+    let rendered = plain_lines(&render_markdown_text(markdown)).join("\n");
+
+    assert!(rendered.contains("x²"));
+    assert!(rendered.contains(r"$$\frac{a}{b}$$"));
+}
+
+#[test]
+fn oversized_display_math_preserves_raw_latex() {
+    let text = render_markdown_text_with_width(
+        r"$$abcdefghijklmnopqrstuvwxyz$$",
+        Some(/*width*/ 12),
+    );
+
+    assert_eq!(
+        plain_lines(&text).join(""),
+        r"$$abcdefghijklmnopqrstuvwxyz$$",
+    );
+}
+
+#[test]
+fn malformed_math_corpus_never_panics() {
+    let samples = [
+        r"$\frac{a$",
+        r"$$\sqrt{$$",
+        r"$\unknown{value}$",
+        r"\(\sum_{i=0}^{n}\)",
+        r"\[\begin{matrix}a & b \\ c\end{matrix}\]",
+        r"`$x^2$`",
+        r"\$5 and $HOME",
+    ];
+
+    for index in 0..1_000 {
+        let sample = samples[index % samples.len()];
+        let _ = render_markdown_text_with_width(sample, Some(/*width*/ 80));
+    }
+}

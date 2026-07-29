@@ -1,0 +1,6 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: "plain_lines(&render_markdown_text(markdown)).join(\"\\n\")"
+---
+σ   [i,j] = stdₛ D     [i,j]
+ ℓ,m              ℓ,m,s

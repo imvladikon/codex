@@ -107,6 +107,19 @@ fn incremental_render_keeps_final_block_mutable_and_matches_full_render() {
 }
 
 #[test]
+fn incremental_render_preserves_literal_dollars() {
+    let (_, render) = assert_rich_stream_matches_full_render(
+        &["Price $5 and ", "$10; shell ", "$HOME; code ", "`$x^2$`.\n"],
+        Some(/*width*/ 80),
+    );
+
+    assert_eq!(
+        lines_to_plain_strings(&render.lines),
+        vec!["Price $5 and $10; shell $HOME; code $x^2$."],
+    );
+}
+
+#[test]
 fn growing_single_top_level_blocks_render_and_scan_in_one_pass() {
     let streams: &[&[&str]] = &[
         &[

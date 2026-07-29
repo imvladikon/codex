@@ -1,0 +1,370 @@
+use super::HyperlinkLine;
+use super::Writer;
+use pulldown_cmark::CowStr;
+use pulldown_cmark::Event;
+use ratatui::text::Line;
+use ratatui::text::Span;
+use std::borrow::Cow;
+use std::ops::Range;
+use std::panic::catch_unwind;
+use unicode_width::UnicodeWidthStr;
+
+mod normalization;
+
+pub(super) use normalization::normalize_tex_delimiters;
+pub(super) use normalization::restore_literal_dollars;
+
+const MAX_MATH_SOURCE_BYTES: usize = 8 * 1024;
+const MAX_MATH_NESTING: usize = 64;
+const MAX_MATH_ROWS: usize = 24;
+const MAX_MATH_COLUMNS: usize = 256;
+const LITERAL_DOLLAR_SENTINEL: u8 = 0x1e;
+const INLINE_DELIMITER_SENTINEL: u8 = 0x1f;
+
+pub(super) struct RenderedMath {
+    pub(super) rows: Vec<String>,
+    pub(super) width: usize,
+    baseline: usize,
+}
+
+impl<'a, 'policy, I> Writer<'a, 'policy, I>
+where
+    I: Iterator<Item = (Event<'a>, Range<usize>)>,
+{
+    pub(super) fn inline_math(&mut self, source: CowStr<'a>, range: Range<usize>) {
+        if self.suppressing_local_link_label() {
+            return;
+        }
+        self.line_ends_with_local_link_target = false;
+        if self.looks_like_currency(source_body(&source), &range) {
+            self.text(
+                self.raw_math(source.as_ref(), range, /*display*/ false)
+                    .into(),
+            );
+            return;
+        }
+        let rendered = render(&source).filter(|rendered| {
+            self.available_math_width()
+                .is_none_or(|width| rendered.width <= width)
+        });
+        let Some(row) = rendered.as_ref().and_then(inline_row) else {
+            self.text(
+                self.raw_math(source.as_ref(), range, /*display*/ false)
+                    .into(),
+            );
+            return;
+        };
+        if self
+            .available_math_width()
+            .is_some_and(|width| UnicodeWidthStr::width(row.as_str()) > width)
+        {
+            self.text(
+                self.raw_math(source.as_ref(), range, /*display*/ false)
+                    .into(),
+            );
+            return;
+        }
+        let style = self.inline_styles.last().copied().unwrap_or_default();
+        let span = Span::styled(row, style);
+        if self.in_table_cell() {
+            self.push_span_to_table_cell(span);
+        } else {
+            if self.pending_marker_line {
+                self.push_line(Line::default());
+            }
+            self.pending_marker_line = false;
+            self.push_span(span);
+        }
+    }
+
+    pub(super) fn display_math(&mut self, source: CowStr<'a>, range: Range<usize>) {
+        if self.suppressing_local_link_label() {
+            return;
+        }
+        self.line_ends_with_local_link_target = false;
+        if self.in_table_cell() {
+            let raw = self.raw_math(source.as_ref(), range, /*display*/ true);
+            let style = self.inline_styles.last().copied().unwrap_or_default();
+            self.push_span_to_table_cell(Span::styled(raw, style));
+            return;
+        }
+
+        let rendered = render(&source).filter(|rendered| {
+            self.available_math_width()
+                .is_none_or(|width| rendered.width <= width)
+        });
+        let Some(rendered) = rendered else {
+            if self.current_line_has_content() {
+                self.flush_current_line();
+            }
+            self.text(
+                self.raw_math(source.as_ref(), range, /*display*/ true)
+                    .into(),
+            );
+            self.needs_newline = true;
+            return;
+        };
+
+        let style = self.inline_styles.last().copied().unwrap_or_default();
+        let mut rows = rendered.rows.into_iter();
+        let Some(first_row) = rows.next() else {
+            return;
+        };
+        if self.current_line_is_empty() {
+            if let Some(line) = self.current_line_content.as_mut() {
+                line.line.push_span(Span::styled(first_row, style));
+            }
+            self.current_line_skip_wrap = true;
+            self.flush_current_line();
+        } else {
+            self.flush_current_line();
+            self.push_line(Line::from(Span::styled(first_row, style)));
+            self.current_line_skip_wrap = true;
+            self.flush_current_line();
+        }
+        for row in rows {
+            self.push_prewrapped_line(
+                HyperlinkLine::new(Line::from(Span::styled(row, style))),
+                /*pending_marker_line*/ false,
+            );
+        }
+        self.needs_newline = true;
+    }
+
+    fn raw_math(&self, source: &str, range: Range<usize>, display: bool) -> String {
+        let source = source_body(source);
+        let original = self.input.get(range).unwrap_or_default();
+        if (display && (original.starts_with("$$") || original.starts_with(r"\[")))
+            || (!display && (original.starts_with('$') || original.starts_with(r"\(")))
+        {
+            return original.to_owned();
+        }
+        if display {
+            format!("$${source}$$")
+        } else {
+            format!("${source}$")
+        }
+    }
+
+    fn current_line_has_content(&self) -> bool {
+        self.current_line_content
+            .as_ref()
+            .is_some_and(|line| line.line.spans.iter().any(|span| !span.content.is_empty()))
+    }
+
+    fn current_line_is_empty(&self) -> bool {
+        self.current_line_content.is_some() && !self.current_line_has_content()
+    }
+
+    fn available_math_width(&self) -> Option<usize> {
+        self.wrap_width.map(|wrap_width| {
+            let prefix_width = if self.current_line_content.is_some() {
+                Self::spans_display_width(&self.current_initial_indent)
+            } else {
+                Self::spans_display_width(&self.prefix_spans(self.pending_marker_line))
+            };
+            wrap_width.saturating_sub(prefix_width)
+        })
+    }
+
+    fn looks_like_currency(&self, source: &str, range: &Range<usize>) -> bool {
+        self.input
+            .get(range.end..)
+            .and_then(|suffix| suffix.chars().next())
+            .is_some_and(|character| character.is_ascii_digit())
+            && source
+                .trim_start()
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+    }
+}
+
+pub(super) fn source_body(source: &str) -> &str {
+    source
+        .strip_prefix(INLINE_DELIMITER_SENTINEL as char)
+        .and_then(|source| source.strip_suffix(INLINE_DELIMITER_SENTINEL as char))
+        .unwrap_or(source)
+}
+
+pub(super) fn render(source: &str) -> Option<RenderedMath> {
+    if source.len() > MAX_MATH_SOURCE_BYTES || has_excessive_nesting(source) {
+        return None;
+    }
+
+    let source = source_body(source);
+    let source = if source.contains(r"\operatorname{") || source.contains(r"\boxed{") {
+        Cow::Owned(
+            source
+                .replace(r"\operatorname{", r"\mathrm{")
+                .replace(r"\boxed{", "{"),
+        )
+    } else {
+        Cow::Borrowed(source)
+    };
+    let block = catch_unwind(|| term_maths::render(&source)).ok()?;
+    if block.height() == 0
+        || block.height() > MAX_MATH_ROWS
+        || block.width() == 0
+        || block.width() > MAX_MATH_COLUMNS
+    {
+        return None;
+    }
+
+    let rows = block
+        .cells()
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(String::as_str)
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let width = rows
+        .iter()
+        .map(|row| UnicodeWidthStr::width(row.as_str()))
+        .max()
+        .unwrap_or(0);
+    let baseline = block.baseline();
+    (width > 0 && width <= MAX_MATH_COLUMNS).then_some(RenderedMath {
+        rows,
+        width,
+        baseline,
+    })
+}
+
+fn inline_row(rendered: &RenderedMath) -> Option<String> {
+    if rendered.rows.len() == 1 {
+        return rendered.rows.first().cloned();
+    }
+    if rendered.baseline >= rendered.rows.len()
+        || rendered.rows.iter().any(|row| {
+            row.contains('\\')
+                || row.chars().any(|character| {
+                    matches!(
+                        character,
+                        '─' | '━'
+                            | '═'
+                            | '│'
+                            | '⎮'
+                            | '⌠'
+                            | '⌡'
+                            | '√'
+                            | '⎛'
+                            | '⎜'
+                            | '⎝'
+                            | '⎞'
+                            | '⎟'
+                            | '⎠'
+                    )
+                })
+        })
+    {
+        return None;
+    }
+
+    let rows = rendered
+        .rows
+        .iter()
+        .map(|row| row.chars().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut output = String::new();
+    let mut active_script = None;
+    for column in 0..columns {
+        let baseline = rows[rendered.baseline]
+            .get(column)
+            .copied()
+            .filter(|character| !character.is_whitespace());
+        let superscript = rows[..rendered.baseline]
+            .iter()
+            .filter_map(|row| row.get(column).copied())
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        let subscript = rows[rendered.baseline + 1..]
+            .iter()
+            .filter_map(|row| row.get(column).copied())
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+
+        if let Some(character) = baseline {
+            close_script(&mut output, &mut active_script);
+            output.push(character);
+        }
+        append_script(
+            &mut output,
+            &mut active_script,
+            ScriptPosition::Above,
+            &superscript,
+        );
+        append_script(
+            &mut output,
+            &mut active_script,
+            ScriptPosition::Below,
+            &subscript,
+        );
+        if baseline.is_none() && superscript.is_empty() && subscript.is_empty() {
+            close_script(&mut output, &mut active_script);
+            if !output.ends_with(' ') {
+                output.push(' ');
+            }
+        }
+    }
+    close_script(&mut output, &mut active_script);
+    let output = output.trim().to_owned();
+    (!output.is_empty()).then_some(output)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ScriptPosition {
+    Above,
+    Below,
+}
+
+fn append_script(
+    output: &mut String,
+    active_script: &mut Option<ScriptPosition>,
+    position: ScriptPosition,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if *active_script != Some(position) {
+        close_script(output, active_script);
+        output.push(match position {
+            ScriptPosition::Above => '⁽',
+            ScriptPosition::Below => '₍',
+        });
+        *active_script = Some(position);
+    }
+    output.push_str(text);
+}
+
+fn close_script(output: &mut String, active_script: &mut Option<ScriptPosition>) {
+    if let Some(position) = active_script.take() {
+        output.push(match position {
+            ScriptPosition::Above => '⁾',
+            ScriptPosition::Below => '₎',
+        });
+    }
+}
+
+fn has_excessive_nesting(source: &str) -> bool {
+    let mut depth = 0;
+    for byte in source.bytes() {
+        match byte {
+            b'{' => {
+                depth += 1;
+                if depth > MAX_MATH_NESTING {
+                    return true;
+                }
+            }
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
+}

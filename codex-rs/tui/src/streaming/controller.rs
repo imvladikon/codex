@@ -393,6 +393,9 @@ impl StreamCore {
         if self.render_mode == HistoryRenderMode::Raw {
             return 0;
         }
+        if self.render.has_unclosed_math_delimiter {
+            return self.render.lines.len();
+        }
         let scan_start = Instant::now();
         let holdback_state = self.holdback_scanner.state();
         let tail_budget = match holdback_state {
@@ -1256,6 +1259,26 @@ mod tests {
             streamed, expected,
             "expected exact rendered lines for loose/tight section"
         );
+    }
+
+    #[test]
+    fn controller_holds_tex_math_until_the_closing_delimiter() {
+        let deltas = [
+            "\\",
+            "[\n",
+            "\\boxed{\n",
+            "R_{\\mu\\nu} = \\frac{8\\pi G}{c^4}T_{\\mu\\nu}\n",
+            "}\n",
+            "\\",
+            "]\n",
+            "Then \\(R_{\\mu\\nu}\\) is the Ricci tensor.\n",
+        ];
+        let streamed = collect_streamed_lines(&deltas, Some(/*width*/ 80));
+        let source = deltas.concat();
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(/*width*/ 80), &mut rendered);
+
+        assert_eq!(streamed, lines_to_plain_strings(&rendered));
     }
 
     #[test]

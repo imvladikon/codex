@@ -24,6 +24,8 @@ pub(super) struct StreamingRender {
     stable_source_len: usize,
     /// Rendered-line boundary corresponding to `stable_source_len`.
     stable_rendered_len: usize,
+    /// A supported TeX math span is still mutable because its closer has not arrived.
+    pub(super) has_unclosed_math_delimiter: bool,
     /// Reference-style link definitions can affect any earlier or later markdown block.
     has_reference_link_definition: bool,
     /// Inline visualization directives require source-wide rewriting once one is committed.
@@ -36,6 +38,7 @@ impl StreamingRender {
             lines: Vec::with_capacity(64),
             stable_source_len: 0,
             stable_rendered_len: 0,
+            has_unclosed_math_delimiter: false,
             has_reference_link_definition: false,
             has_inline_visualization_directive: false,
         }
@@ -45,6 +48,7 @@ impl StreamingRender {
         self.lines.clear();
         self.stable_source_len = 0;
         self.stable_rendered_len = 0;
+        self.has_unclosed_math_delimiter = false;
         self.has_reference_link_definition = false;
         self.has_inline_visualization_directive = false;
     }
@@ -62,10 +66,13 @@ impl StreamingRender {
         inline_visualization_context: Option<&InlineVisualizationContext>,
     ) {
         self.has_inline_visualization_directive = source.contains(DIRECTIVE_PREFIX);
-        self.lines = match (render_mode, inline_visualization_context) {
-            (HistoryRenderMode::Rich, None) if !self.has_inline_visualization_directive => {
-                let rendered =
-                    render_streaming_markdown_agent_with_links_and_cwd(source, width, Some(cwd));
+        let streaming_render = (render_mode == HistoryRenderMode::Rich)
+            .then(|| render_streaming_markdown_agent_with_links_and_cwd(source, width, Some(cwd)));
+        self.has_unclosed_math_delimiter = streaming_render
+            .as_ref()
+            .is_some_and(|rendered| rendered.has_unclosed_math_delimiter);
+        self.lines = match (streaming_render, inline_visualization_context) {
+            (Some(rendered), None) if !self.has_inline_visualization_directive => {
                 self.has_reference_link_definition = rendered.has_reference_link_definition;
                 rendered.lines
             }
@@ -100,6 +107,7 @@ impl StreamingRender {
         inline_visualization_context: Option<&InlineVisualizationContext>,
     ) {
         if render_mode == HistoryRenderMode::Raw {
+            self.has_unclosed_math_delimiter = false;
             self.lines
                 .extend(plain_hyperlink_lines(raw_lines_from_source(
                     committed_source,
@@ -133,6 +141,7 @@ impl StreamingRender {
         let pending_source = &raw_source[self.stable_source_len..];
         let pending =
             render_streaming_markdown_agent_with_links_and_cwd(pending_source, width, Some(cwd));
+        self.has_unclosed_math_delimiter = pending.has_unclosed_math_delimiter;
         if pending.has_reference_link_definition {
             self.has_reference_link_definition = true;
             self.recompute(

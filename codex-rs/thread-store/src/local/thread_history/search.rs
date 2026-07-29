@@ -356,6 +356,8 @@ fn markdown_to_search_text(markdown: &str) -> String {
         match event {
             Event::Text(value)
             | Event::Code(value)
+            | Event::InlineMath(value)
+            | Event::DisplayMath(value)
             | Event::Html(value)
             | Event::InlineHtml(value) => text.push_str(&value),
             Event::SoftBreak | Event::HardBreak | Event::Rule => text.push(' '),
