@@ -22,8 +22,8 @@ pub(crate) struct StreamingMarkdownRender {
     pub(crate) lines: Vec<HyperlinkLine>,
     /// Byte offset of the final top-level block when at least one earlier block exists.
     pub(crate) last_top_level_block_start: Option<usize>,
-    /// Whether a supported TeX delimiter is still waiting for its closing delimiter.
-    pub(crate) has_unclosed_math_delimiter: bool,
+    /// Byte offset of the top-level block containing a math delimiter awaiting its closer.
+    pub(crate) unclosed_math_start: Option<usize>,
     /// Whether a reference definition can retroactively change another block's rendering.
     pub(crate) has_reference_link_definition: bool,
     /// Whether the first block is raw HTML, which joins a retained prefix without a separator.
@@ -50,13 +50,19 @@ pub(crate) fn render_streaming_markdown_lines_with_width_and_cwd(
     };
     let mut writer = Writer::new(input, parser, width, cwd, &never_hide_link_destination);
     writer.run();
-    let last_top_level_block_start = (writer.iter.block_count > 1
-        && !normalized.has_unclosed_delimiter)
+    let unclosed_math_start = normalized.unclosed_math_start.map(|delimiter_start| {
+        if writer.iter.block_count == 0 {
+            delimiter_start
+        } else {
+            writer.iter.last_start.min(delimiter_start)
+        }
+    });
+    let last_top_level_block_start = (writer.iter.block_count > 1 && unclosed_math_start.is_none())
         .then_some(writer.iter.last_start);
     StreamingMarkdownRender {
         lines: writer.text,
         last_top_level_block_start,
-        has_unclosed_math_delimiter: normalized.has_unclosed_delimiter,
+        unclosed_math_start,
         has_reference_link_definition,
         first_top_level_block_is_html: writer.iter.first_is_html,
     }

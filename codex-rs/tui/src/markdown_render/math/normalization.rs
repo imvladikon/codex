@@ -1,8 +1,9 @@
-use super::INLINE_DELIMITER_SENTINEL;
+use super::super::markdown_options;
 use super::LITERAL_DOLLAR_SENTINEL;
-use pulldown_cmark::CodeBlockKind;
+use super::looks_like_literal_dollars;
 use pulldown_cmark::CowStr;
 use pulldown_cmark::Event;
+use pulldown_cmark::Options;
 use pulldown_cmark::Parser;
 use pulldown_cmark::Tag;
 use pulldown_cmark::TagEnd;
@@ -11,12 +12,17 @@ use std::ops::Range;
 
 pub(in crate::markdown_render) struct NormalizedMath<'a> {
     pub(in crate::markdown_render) source: Cow<'a, str>,
-    pub(in crate::markdown_render) has_unclosed_delimiter: bool,
+    pub(in crate::markdown_render) unclosed_math_start: Option<usize>,
 }
 
 struct DelimiterPair {
     open_offset: usize,
     close_offset: usize,
+}
+
+struct NativeMathRanges {
+    literal_dollars: Vec<usize>,
+    literal_math: Vec<Range<usize>>,
 }
 
 pub(in crate::markdown_render) fn restore_literal_dollars(text: CowStr<'_>) -> CowStr<'_> {
@@ -28,124 +34,228 @@ pub(in crate::markdown_render) fn restore_literal_dollars(text: CowStr<'_>) -> C
 }
 
 pub(in crate::markdown_render) fn normalize_tex_delimiters(input: &str) -> NormalizedMath<'_> {
-    let protected_ranges = code_ranges(input);
-    let (display_pairs, unclosed_display) =
-        collect_paired_delimiters(input, &protected_ranges, b'[', b']');
-    let (inline_pairs, unclosed_inline) =
-        collect_paired_delimiters(input, &protected_ranges, b'(', b')');
-    let has_unclosed_delimiter = unclosed_display || unclosed_inline;
-    let mut normalized = input.as_bytes().to_vec();
-    let neutralized_dollars = neutralize_literal_dollars(input, &mut normalized, &protected_ranges);
-    if display_pairs.is_empty() && inline_pairs.is_empty() && !neutralized_dollars {
+    if !input.as_bytes().contains(&b'$') && !input.contains(r"\(") && !input.contains(r"\[") {
         return NormalizedMath {
             source: Cow::Borrowed(input),
-            has_unclosed_delimiter,
+            unclosed_math_start: None,
         };
     }
 
-    for pair in display_pairs {
-        normalized[pair.open_offset..pair.open_offset + 2].copy_from_slice(b"$$");
-        normalized[pair.close_offset..pair.close_offset + 2].copy_from_slice(b"$$");
-        normalize_display_whitespace(input, &mut normalized, &pair);
+    let (text_ranges, containers) = markdown_ranges(input);
+    let mut native_math = native_math_ranges(input);
+    native_math
+        .literal_dollars
+        .retain(|&offset| is_text_source(offset..offset + 1, &text_ranges));
+    let mut pairs = Vec::new();
+    let mut unclosed_math_start = None;
+    for region in math_regions(input) {
+        let (display_pairs, unclosed_display) =
+            collect_paired_delimiters(input, &region, &text_ranges, &containers, b'[', b']');
+        let (inline_pairs, unclosed_inline) =
+            collect_paired_delimiters(input, &region, &text_ranges, &containers, b'(', b')');
+        pairs.extend(display_pairs.into_iter().map(|pair| (pair, b'[', b']')));
+        pairs.extend(inline_pairs.into_iter().map(|pair| (pair, b'(', b')')));
+
+        if region.end == input.len() {
+            unclosed_math_start = [
+                unclosed_display,
+                unclosed_inline,
+                unclosed_native_math_start(&region, &native_math.literal_dollars),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+        }
     }
-    for pair in inline_pairs {
-        normalized[pair.open_offset..pair.open_offset + 2]
-            .copy_from_slice(&[b'$', INLINE_DELIMITER_SENTINEL]);
-        normalized[pair.close_offset..pair.close_offset + 2]
-            .copy_from_slice(&[INLINE_DELIMITER_SENTINEL, b'$']);
+    pairs.sort_by_key(|(pair, _, _)| pair.open_offset);
+    let mut previous_end = None;
+    pairs.retain(|(pair, _, _)| {
+        if previous_end.is_some_and(|end| pair.open_offset < end) {
+            false
+        } else {
+            previous_end = Some(pair.close_offset + 2);
+            true
+        }
+    });
+
+    if pairs.is_empty()
+        && native_math.literal_dollars.is_empty()
+        && native_math.literal_math.is_empty()
+    {
+        return NormalizedMath {
+            source: Cow::Borrowed(input),
+            unclosed_math_start,
+        };
+    }
+
+    let mut normalized = input.as_bytes().to_vec();
+    for offset in native_math.literal_dollars {
+        normalized[offset] = LITERAL_DOLLAR_SENTINEL;
+    }
+    for range in native_math.literal_math {
+        normalized[range.start] = LITERAL_DOLLAR_SENTINEL;
+        let close_offset = range.end.saturating_sub(1);
+        if is_text_source(close_offset..range.end, &text_ranges) {
+            normalized[close_offset] = LITERAL_DOLLAR_SENTINEL;
+        }
+    }
+    for (pair, open, close) in pairs {
+        match (open, close) {
+            (b'[', b']') => {
+                normalize_display_whitespace(&mut normalized, &pair);
+                normalized[pair.open_offset..pair.open_offset + 2].copy_from_slice(b"$$");
+                normalized[pair.close_offset..pair.close_offset + 2].copy_from_slice(b"$$");
+            }
+            (b'(', b')') => {
+                normalized[pair.open_offset..pair.open_offset + 2].copy_from_slice(b"${");
+                normalized[pair.close_offset..pair.close_offset + 2].copy_from_slice(b"}$");
+            }
+            _ => unreachable!("delimiter kinds are fixed above"),
+        }
     }
     let source = String::from_utf8(normalized)
         .map(Cow::Owned)
         .unwrap_or_else(|_| Cow::Borrowed(input));
     NormalizedMath {
         source,
-        has_unclosed_delimiter,
+        unclosed_math_start,
     }
 }
 
-fn neutralize_literal_dollars(
-    input: &str,
-    normalized: &mut [u8],
-    protected_ranges: &[Range<usize>],
-) -> bool {
-    let bytes = input.as_bytes();
-    let mut changed = false;
-    for index in 0..bytes.len() {
-        if bytes[index] != b'$'
-            || bytes.get(index.wrapping_sub(1)) == Some(&b'$')
-            || bytes.get(index + 1) == Some(&b'$')
-            || is_protected(index, protected_ranges)
-            || is_escaped(bytes, index)
-        {
-            continue;
-        }
-        let Some(next) = bytes.get(index + 1).copied() else {
-            continue;
-        };
-        let looks_literal = next.is_ascii_digit() || next == b'_' || next.is_ascii_uppercase();
-        if looks_literal && !has_inline_math_closer(bytes, index, protected_ranges) {
-            normalized[index] = LITERAL_DOLLAR_SENTINEL;
-            changed = true;
-        }
-    }
-    changed
-}
-
-fn has_inline_math_closer(
-    bytes: &[u8],
-    open_offset: usize,
-    protected_ranges: &[Range<usize>],
-) -> bool {
-    let mut index = open_offset + 1;
-    while index < bytes.len() && !matches!(bytes[index], b'\r' | b'\n') {
-        if bytes[index] == b'$'
-            && bytes.get(index.wrapping_sub(1)) != Some(&b'$')
-            && bytes.get(index + 1) != Some(&b'$')
-            && !bytes[index - 1].is_ascii_whitespace()
-            && !is_protected(index, protected_ranges)
-            && !is_escaped(bytes, index)
-        {
-            return true;
-        }
-        index += 1;
-    }
-    false
-}
-
-fn code_ranges(input: &str) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut code_block_start = None;
-    for (event, range) in Parser::new(input).into_offset_iter() {
+fn markdown_ranges(input: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+    let mut text_ranges = Vec::new();
+    let mut containers = Vec::new();
+    let mut protected_depth = 0usize;
+    let mut options = markdown_options();
+    options.remove(Options::ENABLE_MATH);
+    for (event, range) in Parser::new_ext(input, options).into_offset_iter() {
         match event {
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_) | CodeBlockKind::Indented)) => {
-                code_block_start = Some(range.start);
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                if let Some(start) = code_block_start.take() {
-                    ranges.push(start..range.end);
-                }
-            }
-            Event::Code(_) => ranges.push(range),
+            Event::Start(
+                Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::Image { .. } | Tag::MetadataBlock(_),
+            ) => protected_depth += 1,
+            Event::End(
+                TagEnd::CodeBlock | TagEnd::HtmlBlock | TagEnd::Image | TagEnd::MetadataBlock(_),
+            ) => protected_depth = protected_depth.saturating_sub(1),
+            Event::Start(Tag::Link { .. } | Tag::TableCell) => containers.push(range),
+            Event::Text(_) if protected_depth == 0 => text_ranges.push(range),
             _ => {}
         }
     }
-    ranges
+    (text_ranges, containers)
+}
+
+fn native_math_ranges(input: &str) -> NativeMathRanges {
+    let mut literal_dollars = Vec::new();
+    let mut literal_math = Vec::new();
+    for (event, range) in Parser::new_ext(input, markdown_options()).into_offset_iter() {
+        match event {
+            Event::Text(_) => {
+                literal_dollars.extend(range.filter(|&offset| {
+                    input.as_bytes()[offset] == b'$' && !is_escaped(input.as_bytes(), offset)
+                }));
+            }
+            Event::InlineMath(source) if looks_like_literal_dollars(input, &source, &range) => {
+                literal_math.push(range);
+            }
+            _ => {}
+        }
+    }
+    NativeMathRanges {
+        literal_dollars,
+        literal_math,
+    }
+}
+
+fn math_regions(input: &str) -> Vec<Range<usize>> {
+    let mut regions = Vec::new();
+    let mut region_start = None;
+    let mut line_start = 0;
+    for line in input.split_inclusive('\n') {
+        let line_without_ending = line.strip_suffix('\n').unwrap_or(line);
+        let line_without_ending = line_without_ending
+            .strip_suffix('\r')
+            .unwrap_or(line_without_ending);
+        if line_without_ending.trim().is_empty() {
+            if let Some(start) = region_start.take() {
+                regions.push(start..line_start);
+            }
+        } else if is_markdown_block_start(line_without_ending)
+            && let Some(start) = region_start.replace(line_start)
+            && start < line_start
+        {
+            regions.push(start..line_start);
+        } else {
+            region_start.get_or_insert(line_start);
+        }
+        line_start += line.len();
+    }
+    if let Some(start) = region_start {
+        regions.push(start..input.len());
+    }
+    regions
+}
+
+fn is_markdown_block_start(line: &str) -> bool {
+    let indentation = line
+        .len()
+        .saturating_sub(line.trim_start_matches(' ').len());
+    if indentation >= 4 || line[indentation..].starts_with('\t') {
+        return true;
+    }
+    let line = &line[indentation..];
+    let heading = line.starts_with('#')
+        && line
+            .trim_start_matches('#')
+            .strip_prefix([' ', '\t'])
+            .is_some()
+        && line
+            .len()
+            .saturating_sub(line.trim_start_matches('#').len())
+            <= 6;
+    let unordered_list = ["- ", "* ", "+ "]
+        .into_iter()
+        .any(|marker| line.starts_with(marker));
+    let ordered_list = line.find(['.', ')']).is_some_and(|offset| {
+        offset > 0
+            && line[..offset].bytes().all(|byte| byte.is_ascii_digit())
+            && line[offset + 1..].starts_with([' ', '\t'])
+    });
+    let thematic_break = ['*', '-', '_'].into_iter().any(|marker| {
+        line.chars()
+            .all(|character| character == marker || matches!(character, ' ' | '\t'))
+            && line
+                .chars()
+                .filter(|character| *character == marker)
+                .count()
+                >= 3
+    });
+    heading
+        || unordered_list
+        || ordered_list
+        || thematic_break
+        || line.starts_with('>')
+        || line.starts_with("```")
+        || line.starts_with("~~~")
+        || line.starts_with('|')
+        || line.starts_with('<')
 }
 
 fn collect_paired_delimiters(
     input: &str,
-    protected_ranges: &[Range<usize>],
+    block: &Range<usize>,
+    text_ranges: &[Range<usize>],
+    containers: &[Range<usize>],
     open: u8,
     close: u8,
-) -> (Vec<DelimiterPair>, bool) {
+) -> (Vec<DelimiterPair>, Option<usize>) {
     let bytes = input.as_bytes();
     let mut pairs = Vec::new();
     let mut open_offset = None;
-    let mut index = 0;
-    while index + 1 < bytes.len() {
+    let mut index = block.start;
+    while index + 1 < block.end {
         if bytes[index] != b'\\'
-            || is_protected(index, protected_ranges)
-            || !is_unescaped_backslash(bytes, index)
+            || !is_text_source(index + 1..index + 2, text_ranges)
+            || is_escaped(bytes, index)
         {
             index += 1;
             continue;
@@ -154,46 +264,57 @@ fn collect_paired_delimiters(
         match (bytes[index + 1], open_offset) {
             (delimiter, None) if delimiter == open => open_offset = Some(index),
             (delimiter, Some(start)) if delimiter == close => {
-                pairs.push(DelimiterPair {
-                    open_offset: start,
-                    close_offset: index,
-                });
+                if !crosses_container_boundary(start, index, containers) {
+                    pairs.push(DelimiterPair {
+                        open_offset: start,
+                        close_offset: index,
+                    });
+                }
                 open_offset = None;
             }
             _ => {}
         }
         index += 2;
     }
-    (pairs, open_offset.is_some())
+    (pairs, open_offset)
 }
 
-fn normalize_display_whitespace(input: &str, normalized: &mut [u8], pair: &DelimiterPair) {
-    let bytes = input.as_bytes();
-    let source_start = pair.open_offset + 2;
-    let source_end = pair.close_offset;
-    for byte in &mut normalized[source_start..source_end] {
+fn normalize_display_whitespace(normalized: &mut [u8], pair: &DelimiterPair) {
+    for byte in &mut normalized[pair.open_offset + 2..pair.close_offset] {
         if matches!(*byte, b'\r' | b'\n') {
             *byte = b' ';
         }
     }
-    if bytes.get(source_start).is_some_and(u8::is_ascii_whitespace) {
-        normalized[source_start] = INLINE_DELIMITER_SENTINEL;
-    }
-    if source_end > source_start
-        && bytes
-            .get(source_end - 1)
-            .is_some_and(u8::is_ascii_whitespace)
-    {
-        normalized[source_end - 1] = INLINE_DELIMITER_SENTINEL;
-    }
 }
 
-fn is_protected(offset: usize, ranges: &[Range<usize>]) -> bool {
-    ranges.iter().any(|range| range.contains(&offset))
+fn unclosed_native_math_start(block: &Range<usize>, literal_dollars: &[usize]) -> Option<usize> {
+    literal_dollars
+        .iter()
+        .copied()
+        .find(|offset| block.contains(offset))
 }
 
-fn is_unescaped_backslash(bytes: &[u8], offset: usize) -> bool {
-    !is_escaped(bytes, offset)
+fn is_text_source(source: Range<usize>, text_ranges: &[Range<usize>]) -> bool {
+    let index = text_ranges.partition_point(|range| range.end <= source.start);
+    text_ranges
+        .get(index)
+        .is_some_and(|range| range.start <= source.start && source.end <= range.end)
+}
+
+fn crosses_container_boundary(
+    open_offset: usize,
+    close_offset: usize,
+    containers: &[Range<usize>],
+) -> bool {
+    containers.iter().any(|range| {
+        let open_inside = range.contains(&open_offset);
+        let close_inside = range.contains(&close_offset);
+        open_inside != close_inside
+            || (!open_inside
+                && !close_inside
+                && open_offset < range.start
+                && range.end <= close_offset)
+    })
 }
 
 fn is_escaped(bytes: &[u8], offset: usize) -> bool {

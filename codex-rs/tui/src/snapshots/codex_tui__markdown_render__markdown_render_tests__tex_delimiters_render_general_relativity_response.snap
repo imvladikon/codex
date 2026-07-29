@@ -2,15 +2,21 @@
 source: tui/src/markdown_render_tests.rs
 expression: "plain_lines(&render_markdown_text(markdown)).join(\"\\n\")"
 ---
-        12                8πG
- R   - ────Rg   + Λg   = ─────T
-  μν         μν     μν    c⁴   μν
+┌─────────────────────────────────┐
+│        12                8πG    │
+│ R   - ────Rg   + Λg   = ─────T  │
+│  μν         μν     μν    c⁴   μν│
+└─────────────────────────────────┘
 
 - R₍μν₎ is the Ricci tensor.
 
-matter determines spacetime curvature
+┌─────────────────────────────────────┐
+│matter determines spacetime curvature│
+└─────────────────────────────────────┘
 
-     μ           α     β
-  d²x      μ   dx    dx
- ────── + Γ   ───── ───── = 0
-  dτ²      αβ  dτ    dτ
+┌─────────────────────────────┐
+│     μ           α     β     │
+│  d²x      μ   dx    dx      │
+│ ────── + Γ   ───── ───── = 0│
+│  dτ²      αβ  dτ    dτ      │
+└─────────────────────────────┘

@@ -1884,6 +1884,292 @@ fn tex_delimiter_normalization_does_not_touch_code_blocks() {
 }
 
 #[test]
+fn tex_delimiters_do_not_pair_across_markdown_blocks() {
+    let markdown = "# Heading \\[\n\nParagraph \\]\n";
+    let lines = plain_lines(&render_markdown_text(markdown));
+
+    assert_eq!(lines, vec!["# Heading [", "", "Paragraph ]"]);
+}
+
+#[test]
+fn tex_delimiters_do_not_cross_blank_lines_or_structural_blocks() {
+    for markdown in [
+        "\\[\nx\n\n# heading\n\\]",
+        "\\[\nx\n# heading\ny\n\\]",
+        "first \\(x\n\nsecond \\) end",
+    ] {
+        let rendered = plain_lines(&render_markdown_text(markdown));
+        let rendered_text = rendered.join("\n");
+
+        assert!(
+            rendered_text.contains("heading") || rendered_text.contains("second"),
+            "swallowed a later Markdown block in {markdown:?}: {rendered_text:?}",
+        );
+        assert!(
+            !rendered_text
+                .chars()
+                .any(|character| character.is_control() && character != '\n'),
+        );
+    }
+}
+
+#[test]
+fn tex_delimiters_do_not_cross_any_structural_markdown_line() {
+    for structure in [
+        "- STRUCTURE",
+        "> STRUCTURE",
+        "```text\nSTRUCTURE\n```",
+        "| STRUCTURE | value |\n| --- | --- |",
+        "---\nSTRUCTURE",
+        "<div>STRUCTURE</div>",
+        "    STRUCTURE",
+        "\tSTRUCTURE",
+    ] {
+        let markdown = format!("\\[\nx\n{structure}\ny\n\\]\n");
+        let rendered = plain_lines(&render_markdown_text(&markdown));
+        let rendered_text = rendered.join("\n");
+
+        assert!(
+            rendered_text.contains('[') && rendered_text.contains(']'),
+            "paired TeX delimiters across {structure:?}: {rendered_text:?}",
+        );
+        assert!(
+            rendered_text.contains("STRUCTURE"),
+            "swallowed structural content in {markdown:?}: {rendered_text:?}",
+        );
+        assert!(
+            !rendered_text
+                .chars()
+                .any(|character| character.is_control() && character != '\n'),
+        );
+    }
+}
+
+#[test]
+fn nested_tex_delimiters_preserve_exact_raw_source() {
+    for markdown in [r"\(\[x\]\)", r"\[\(x\)\]"] {
+        assert_eq!(
+            plain_lines(&render_markdown_text(markdown)),
+            vec![markdown],
+        );
+    }
+}
+
+#[test]
+fn tex_delimiter_normalization_does_not_touch_destinations_or_html() {
+    let destination = "https://example.com/(x)";
+    let markdown = concat!(
+        "[label](https://example.com/\\(x\\))\n\n",
+        "<span data-math=\"\\[y\\]\">html</span>\n",
+    );
+    let lines = render_markdown_lines_with_width_and_cwd(
+        markdown,
+        /*width*/ Some(120),
+        /*cwd*/ None,
+    );
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let destinations = lines
+        .iter()
+        .flat_map(|line| line.hyperlinks.iter())
+        .map(|link| link.destination.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered,
+        vec![
+            format!("label ({destination})"),
+            String::new(),
+            r#"<span data-math="\[y\]">html</span>"#.to_string(),
+        ],
+    );
+    assert_eq!(destinations, vec![destination, destination]);
+}
+
+#[test]
+fn tex_delimiters_do_not_cross_markdown_containers() {
+    let destination = "https://example.com/math";
+    let markdown = format!(r"\([label]({destination})\)");
+    let lines = render_markdown_lines_with_width_and_cwd(
+        &markdown,
+        /*width*/ Some(120),
+        /*cwd*/ None,
+    );
+
+    assert_eq!(
+        lines
+            .iter()
+            .flat_map(|line| line.hyperlinks.iter())
+            .map(|link| link.destination.as_str())
+            .collect::<Vec<_>>(),
+        vec![destination, destination],
+    );
+
+    let table = "| A | B |\n|---|---|\n| \\(x | y\\) |\n";
+    let rendered = plain_lines(&render_markdown_text(table)).join("\n");
+    assert!(rendered.contains("(x"));
+    assert!(rendered.contains("y)"));
+}
+
+#[test]
+fn dollar_sign_in_link_destination_is_not_normalized() {
+    let destination = "https://example.test/$HOME";
+    let lines = render_markdown_lines_with_width_and_cwd(
+        &format!("[home]({destination})"),
+        /*width*/ Some(120),
+        /*cwd*/ None,
+    );
+
+    assert_eq!(
+        lines
+            .iter()
+            .flat_map(|line| line.hyperlinks.iter())
+            .map(|link| link.destination.as_str())
+            .collect::<Vec<_>>(),
+        vec![destination, destination],
+    );
+}
+
+#[test]
+fn tex_display_delimiters_adjacent_to_newlines_do_not_leak_control_characters() {
+    for markdown in [r"\[
+x\]", r"\[x
+\]"] {
+        let rendered = plain_lines(&render_markdown_text(markdown));
+
+        assert_eq!(rendered, vec!["x"]);
+        assert!(
+            rendered
+                .iter()
+                .all(|line| !line.chars().any(char::is_control))
+        );
+    }
+}
+
+#[test]
+fn shell_variables_and_currency_ranges_stay_literal() {
+    for markdown in [
+        "$foo:$bar",
+        "${HOME}:${USER}",
+        "$HOME/$USER",
+        "$HOME-$USER",
+        "$FOO=${BAR}",
+        "$foo.$bar",
+        "$foo+$bar",
+        "$PATH:$home",
+        "${root}/$file",
+        "$5-$10",
+        "$5.99-$10.99",
+        "$5–$10",
+        "$5+$10",
+        "$5/$10",
+        "PID $$$$",
+    ] {
+        assert_eq!(
+            plain_lines(&render_markdown_text(markdown)),
+            vec![markdown],
+            "changed literal dollars in {markdown:?}",
+        );
+    }
+}
+
+#[test]
+fn literal_dollar_inside_tex_delimiters_preserves_exact_source() {
+    let markdown = r"\($HOME\)";
+
+    assert_eq!(
+        plain_lines(&render_markdown_text(markdown)),
+        vec![markdown],
+    );
+}
+
+#[test]
+fn inline_math_next_to_word_characters_still_renders() {
+    assert_eq!(
+        plain_lines(&render_markdown_text("foo$x$bar, $x^2$, and ${x}_i$")),
+        vec!["fooxbar, x², and xᵢ"],
+    );
+}
+
+#[test]
+fn unsupported_latex_commands_preserve_raw_source() {
+    for markdown in [
+        r"$\unknown{value}$",
+        r"$\boxed{x}$",
+        r"$\operatorname*{argmax}_x$",
+        r"$$\begin{unknown}x\end{unknown}$$",
+    ] {
+        assert_eq!(
+            plain_lines(&render_markdown_text(markdown)).join("\n"),
+            markdown,
+        );
+    }
+}
+
+#[test]
+fn math_preserves_unsupported_combining_text_and_renders_wide_text() {
+    assert_eq!(
+        plain_lines(&render_markdown_text_with_width(
+            r"$\text{漢字}$",
+            Some(/*width*/ 3),
+        ))
+        .join(""),
+        r"$\text{漢字}$",
+    );
+    assert_eq!(
+        plain_lines(&render_markdown_text_with_width(
+            r"$\text{漢字}$",
+            Some(/*width*/ 4),
+        )),
+        vec!["漢字"],
+    );
+    assert_eq!(
+        plain_lines(&render_markdown_text("$e\u{301}$")),
+        vec!["$e\u{301}$"],
+    );
+}
+
+#[test]
+fn inline_math_inside_link_keeps_hyperlink_metadata() {
+    let destination = "https://example.com/math";
+    let lines = render_markdown_lines_with_width_and_cwd(
+        &format!("[$x^2$]({destination})"),
+        /*width*/ Some(120),
+        /*cwd*/ None,
+    );
+
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| {
+                line.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>(),
+        vec![format!("x² ({destination})")],
+    );
+    assert_eq!(
+        lines[0]
+            .hyperlinks
+            .iter()
+            .map(|link| (link.columns.clone(), link.destination.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0..2, destination), (4..4 + destination.len(), destination)],
+    );
+}
+
+#[test]
 fn math_rendering_does_not_change_ordinary_text_or_code() {
     let markdown =
         r"Price $5 and $10; shell $HOME; command \alpha; array[i]; code `$x^2$`.";

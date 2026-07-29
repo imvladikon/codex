@@ -120,6 +120,57 @@ fn incremental_render_preserves_literal_dollars() {
 }
 
 #[test]
+fn incremental_render_tracks_block_containing_unclosed_native_math() {
+    let cwd = test_cwd();
+    let width = Some(80);
+    let mut source = String::new();
+    let mut render = StreamingRender::new();
+    let prefix = "Completed paragraph.\n\nFormula ";
+    let formula_block_start = "Completed paragraph.\n\n".len();
+
+    append(
+        &mut render,
+        &mut source,
+        &format!("{prefix}$x"),
+        width,
+        &cwd,
+        HistoryRenderMode::Rich,
+    );
+    assert_eq!(render.unclosed_math_start, Some(formula_block_start));
+
+    append(
+        &mut render,
+        &mut source,
+        "$ is complete.\n",
+        width,
+        &cwd,
+        HistoryRenderMode::Rich,
+    );
+    assert_eq!(render.unclosed_math_start, None);
+    assert_eq!(
+        render.lines,
+        render_source(
+            &source,
+            width,
+            &cwd,
+            HistoryRenderMode::Rich,
+            /*inline_visualization_context*/ None,
+        ),
+    );
+}
+
+#[test]
+fn completed_paragraph_does_not_hold_unmatched_literal_dollar() {
+    let (_, render) = assert_rich_stream_matches_full_render(
+        &["Shell variable $HOME.\n\n", "Following paragraph.\n"],
+        Some(/*width*/ 80),
+    );
+
+    assert_eq!(render.unclosed_math_start, None);
+    assert!(render.stable_source_len > 0);
+}
+
+#[test]
 fn growing_single_top_level_blocks_render_and_scan_in_one_pass() {
     let streams: &[&[&str]] = &[
         &[

@@ -393,8 +393,8 @@ impl StreamCore {
         if self.render_mode == HistoryRenderMode::Raw {
             return 0;
         }
-        if self.render.has_unclosed_math_delimiter {
-            return self.render.lines.len();
+        if let Some(start) = self.render.unclosed_math_start {
+            return self.tail_budget_from_source_start(start);
         }
         let scan_start = Instant::now();
         let holdback_state = self.holdback_scanner.state();
@@ -1279,6 +1279,102 @@ mod tests {
         crate::markdown::append_markdown_agent(&source, Some(/*width*/ 80), &mut rendered);
 
         assert_eq!(streamed, lines_to_plain_strings(&rendered));
+    }
+
+    #[test]
+    fn controller_emits_completed_prefix_before_unclosed_native_math() {
+        let mut ctrl = stream_controller(Some(80));
+        let prefix = "Completed paragraph.\n\nFormula ";
+        let formula_block_start = "Completed paragraph.\n\n".len();
+        let initial = format!("{prefix}$x\n");
+        assert!(ctrl.push(&initial));
+
+        let (cell, _) = ctrl.on_commit_tick_batch(usize::MAX);
+        let mut emitted = cell
+            .into_iter()
+            .flat_map(|cell| cell.transcript_lines(u16::MAX))
+            .collect::<Vec<_>>();
+        let visible = lines_to_plain_strings(&emitted);
+        assert!(
+            visible
+                .iter()
+                .any(|line| line.contains("Completed paragraph."))
+        );
+        assert!(visible.iter().all(|line| !line.contains("Formula")));
+        assert_eq!(
+            ctrl.core.render.unclosed_math_start,
+            Some(formula_block_start),
+        );
+
+        let closing = "$ is complete.\n";
+        ctrl.push(closing);
+        if let (Some(cell), _) = ctrl.on_commit_tick_batch(usize::MAX) {
+            emitted.extend(cell.transcript_lines(u16::MAX));
+        }
+        let (cell, source) = ctrl.finalize();
+        if let Some(cell) = cell {
+            emitted.extend(cell.transcript_lines(u16::MAX));
+        }
+        let source = source.expect("finalized stream should retain its source");
+        assert_eq!(source, format!("{initial}{closing}"));
+
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(/*width*/ 80), &mut rendered);
+        assert_eq!(
+            lines_to_plain_strings(&emitted)
+                .into_iter()
+                .map(|line| line.chars().skip(2).collect::<String>())
+                .collect::<Vec<_>>(),
+            lines_to_plain_strings(&rendered),
+        );
+    }
+
+    #[test]
+    fn controller_emits_completed_prefix_before_unclosed_tex_math() {
+        let mut ctrl = stream_controller(Some(80));
+        let prefix = "Completed paragraph.\n\nFormula ";
+        let formula_block_start = "Completed paragraph.\n\n".len();
+        let initial = format!("{prefix}\\(\nx");
+        assert!(ctrl.push(&initial));
+
+        let (cell, _) = ctrl.on_commit_tick_batch(usize::MAX);
+        let mut emitted = cell
+            .into_iter()
+            .flat_map(|cell| cell.transcript_lines(u16::MAX))
+            .collect::<Vec<_>>();
+        let visible = lines_to_plain_strings(&emitted);
+        assert!(
+            visible
+                .iter()
+                .any(|line| line.contains("Completed paragraph."))
+        );
+        assert!(visible.iter().all(|line| !line.contains("Formula")));
+        assert_eq!(
+            ctrl.core.render.unclosed_math_start,
+            Some(formula_block_start),
+        );
+
+        let closing = "\\) is complete.\n";
+        ctrl.push(closing);
+        if let (Some(cell), _) = ctrl.on_commit_tick_batch(usize::MAX) {
+            emitted.extend(cell.transcript_lines(u16::MAX));
+        }
+        let (cell, source) = ctrl.finalize();
+        if let Some(cell) = cell {
+            emitted.extend(cell.transcript_lines(u16::MAX));
+        }
+        let source = source.expect("finalized stream should retain its source");
+        assert_eq!(source, format!("{initial}{closing}"));
+
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(/*width*/ 80), &mut rendered);
+        assert_eq!(
+            lines_to_plain_strings(&emitted)
+                .into_iter()
+                .map(|line| line.chars().skip(2).collect::<String>())
+                .collect::<Vec<_>>(),
+            lines_to_plain_strings(&rendered),
+        );
     }
 
     #[test]

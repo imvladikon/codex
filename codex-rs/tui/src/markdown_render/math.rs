@@ -7,6 +7,7 @@ use ratatui::text::Span;
 use std::borrow::Cow;
 use std::ops::Range;
 use std::panic::catch_unwind;
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 mod normalization;
@@ -19,7 +20,6 @@ const MAX_MATH_NESTING: usize = 64;
 const MAX_MATH_ROWS: usize = 24;
 const MAX_MATH_COLUMNS: usize = 256;
 const LITERAL_DOLLAR_SENTINEL: u8 = 0x1e;
-const INLINE_DELIMITER_SENTINEL: u8 = 0x1f;
 
 pub(super) struct RenderedMath {
     pub(super) rows: Vec<String>,
@@ -36,44 +36,36 @@ where
             return;
         }
         self.line_ends_with_local_link_target = false;
-        if self.looks_like_currency(source_body(&source), &range) {
-            self.text(
-                self.raw_math(source.as_ref(), range, /*display*/ false)
-                    .into(),
-            );
+        let original = self.input.get(range.clone()).unwrap_or_default();
+        let source = source_body(&source, original);
+        if looks_like_literal_dollars(self.input, source, &range) {
+            self.text(self.raw_math(source, range, /*display*/ false).into());
             return;
         }
-        let rendered = render(&source).filter(|rendered| {
+        let rendered = render(source).filter(|rendered| {
             self.available_math_width()
                 .is_none_or(|width| rendered.width <= width)
         });
         let Some(row) = rendered.as_ref().and_then(inline_row) else {
-            self.text(
-                self.raw_math(source.as_ref(), range, /*display*/ false)
-                    .into(),
-            );
+            self.text(self.raw_math(source, range, /*display*/ false).into());
             return;
         };
         if self
             .available_math_width()
             .is_some_and(|width| UnicodeWidthStr::width(row.as_str()) > width)
         {
-            self.text(
-                self.raw_math(source.as_ref(), range, /*display*/ false)
-                    .into(),
-            );
+            self.text(self.raw_math(source, range, /*display*/ false).into());
             return;
         }
         let style = self.inline_styles.last().copied().unwrap_or_default();
-        let span = Span::styled(row, style);
         if self.in_table_cell() {
-            self.push_span_to_table_cell(span);
+            self.push_text_spans_to_table_cell(&row, style);
         } else {
             if self.pending_marker_line {
                 self.push_line(Line::default());
             }
             self.pending_marker_line = false;
-            self.push_span(span);
+            self.push_text_spans(&row, style);
         }
     }
 
@@ -82,14 +74,25 @@ where
             return;
         }
         self.line_ends_with_local_link_target = false;
+        let original = self.input.get(range.clone()).unwrap_or_default();
+        let source = source_body(&source, original);
+        if original.len() >= 4 && original.bytes().all(|byte| byte == b'$') {
+            self.text(original.to_owned().into());
+            return;
+        }
         if self.in_table_cell() {
-            let raw = self.raw_math(source.as_ref(), range, /*display*/ true);
+            let raw = self.raw_math(source, range, /*display*/ true);
             let style = self.inline_styles.last().copied().unwrap_or_default();
-            self.push_span_to_table_cell(Span::styled(raw, style));
+            self.push_text_spans_to_table_cell(&raw, style);
+            return;
+        }
+        if self.link.is_some() {
+            let raw = self.raw_math(source, range, /*display*/ true);
+            self.text(raw.into());
             return;
         }
 
-        let rendered = render(&source).filter(|rendered| {
+        let rendered = render(source).filter(|rendered| {
             self.available_math_width()
                 .is_none_or(|width| rendered.width <= width)
         });
@@ -97,10 +100,7 @@ where
             if self.current_line_has_content() {
                 self.flush_current_line();
             }
-            self.text(
-                self.raw_math(source.as_ref(), range, /*display*/ true)
-                    .into(),
-            );
+            self.text(self.raw_math(source, range, /*display*/ true).into());
             self.needs_newline = true;
             return;
         };
@@ -132,7 +132,6 @@ where
     }
 
     fn raw_math(&self, source: &str, range: Range<usize>, display: bool) -> String {
-        let source = source_body(source);
         let original = self.input.get(range).unwrap_or_default();
         if (display && (original.starts_with("$$") || original.starts_with(r"\[")))
             || (!display && (original.starts_with('$') || original.starts_with(r"\(")))
@@ -166,43 +165,111 @@ where
             wrap_width.saturating_sub(prefix_width)
         })
     }
+}
 
-    fn looks_like_currency(&self, source: &str, range: &Range<usize>) -> bool {
-        self.input
-            .get(range.end..)
-            .and_then(|suffix| suffix.chars().next())
-            .is_some_and(|character| character.is_ascii_digit())
-            && source
-                .trim_start()
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_digit())
+pub(super) fn looks_like_literal_dollars(input: &str, source: &str, range: &Range<usize>) -> bool {
+    let suffix = input.get(range.end..).unwrap_or_default();
+    let currency = source
+        .strip_suffix(['-', '–', '—', '+', '/', ':', ';', '='])
+        .is_some_and(|amount| {
+            amount.starts_with(char::is_numeric)
+                && amount.ends_with(char::is_numeric)
+                && amount
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || matches!(character, '.' | ','))
+        })
+        && suffix
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit());
+    let shell_variable = source
+        .strip_suffix([':', '/', ';', '-', '=', '.', '+'])
+        .is_some_and(is_shell_variable)
+        && starts_with_shell_variable(suffix)
+        || split_shell_variable(source).is_some_and(|(variable, remainder)| {
+            (remainder.is_empty()
+                && variable.len() > 1
+                && variable
+                    .chars()
+                    .all(|character| character == '_' || character.is_ascii_uppercase()))
+                || remainder.starts_with([':', '/', ';', '-', '=', '.', '+'])
+        });
+    currency || shell_variable
+}
+
+fn source_body<'a>(source: &'a str, original: &str) -> &'a str {
+    if original.starts_with(r"\(") && original.ends_with(r"\)") {
+        source
+            .strip_prefix('{')
+            .and_then(|source| source.strip_suffix('}'))
+            .unwrap_or(source)
+    } else {
+        source
     }
 }
 
-pub(super) fn source_body(source: &str) -> &str {
-    source
-        .strip_prefix(INLINE_DELIMITER_SENTINEL as char)
-        .and_then(|source| source.strip_suffix(INLINE_DELIMITER_SENTINEL as char))
-        .unwrap_or(source)
+fn is_shell_variable(source: &str) -> bool {
+    let source = source
+        .strip_prefix('{')
+        .and_then(|source| source.strip_suffix('}'))
+        .unwrap_or(source);
+    let mut characters = source.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn starts_with_shell_variable(source: &str) -> bool {
+    split_shell_variable(source).is_some()
+}
+
+fn split_shell_variable(source: &str) -> Option<(&str, &str)> {
+    if let Some(source) = source.strip_prefix('{') {
+        return source
+            .split_once('}')
+            .filter(|(variable, _)| is_shell_variable(variable));
+    }
+    let variable_len = source
+        .char_indices()
+        .take_while(|(_, character)| *character == '_' || character.is_ascii_alphanumeric())
+        .map(|(offset, character)| offset + character.len_utf8())
+        .last()?;
+    let (variable, remainder) = source.split_at(variable_len);
+    is_shell_variable(variable).then_some((variable, remainder))
 }
 
 pub(super) fn render(source: &str) -> Option<RenderedMath> {
-    if source.len() > MAX_MATH_SOURCE_BYTES || has_excessive_nesting(source) {
+    if source.len() > MAX_MATH_SOURCE_BYTES
+        || has_excessive_nesting(source)
+        || source
+            .as_bytes()
+            .iter()
+            .any(|byte| matches!(*byte, b'$' | LITERAL_DOLLAR_SENTINEL))
+        || source
+            .chars()
+            .any(|character| UnicodeWidthChar::width(character) == Some(0))
+        || [r"\(", r"\)", r"\[", r"\]"]
+            .into_iter()
+            .any(|delimiter| source.contains(delimiter))
+    {
         return None;
     }
 
-    let source = source_body(source);
-    let source = if source.contains(r"\operatorname{") || source.contains(r"\boxed{") {
+    let source = source.trim();
+    let source = if source.contains(['\r', '\n']) || source.contains(r"\operatorname{") {
         Cow::Owned(
             source
-                .replace(r"\operatorname{", r"\mathrm{")
-                .replace(r"\boxed{", "{"),
+                .replace(['\r', '\n'], " ")
+                .replace(r"\operatorname{", r"\mathrm{"),
         )
     } else {
         Cow::Borrowed(source)
     };
-    let block = catch_unwind(|| term_maths::render(&source)).ok()?;
+    let (source, boxed) = strip_outer_box(&source)
+        .map(|source| (source, true))
+        .unwrap_or((&source, false));
+    let block = catch_unwind(|| term_maths::render(source)).ok()?;
     if block.height() == 0
         || block.height() > MAX_MATH_ROWS
         || block.width() == 0
@@ -211,7 +278,7 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
         return None;
     }
 
-    let rows = block
+    let mut rows = block
         .cells()
         .iter()
         .map(|row| {
@@ -222,17 +289,63 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
                 .to_owned()
         })
         .collect::<Vec<_>>();
+    if rows.iter().any(|row| {
+        contains_unrendered_command(row)
+            || row
+                .chars()
+                .any(|character| UnicodeWidthChar::width(character) == Some(0))
+    }) {
+        return None;
+    }
+    let mut baseline = block.baseline();
+    if boxed {
+        let inner_width = rows
+            .iter()
+            .map(|row| UnicodeWidthStr::width(row.as_str()))
+            .max()
+            .unwrap_or(0);
+        let mut boxed_rows = Vec::with_capacity(rows.len() + 2);
+        boxed_rows.push(format!("┌{}┐", "─".repeat(inner_width)));
+        boxed_rows.extend(rows.into_iter().map(|row| {
+            let padding = inner_width.saturating_sub(UnicodeWidthStr::width(row.as_str()));
+            format!("│{row}{}│", " ".repeat(padding))
+        }));
+        boxed_rows.push(format!("└{}┘", "─".repeat(inner_width)));
+        rows = boxed_rows;
+        baseline += 1;
+    }
     let width = rows
         .iter()
         .map(|row| UnicodeWidthStr::width(row.as_str()))
         .max()
         .unwrap_or(0);
-    let baseline = block.baseline();
     (width > 0 && width <= MAX_MATH_COLUMNS).then_some(RenderedMath {
         rows,
         width,
         baseline,
     })
+}
+
+fn strip_outer_box(source: &str) -> Option<&str> {
+    let source = source.trim();
+    let body = source.strip_prefix(r"\boxed{")?.strip_suffix('}')?;
+    let mut depth = 0usize;
+    for byte in body.bytes() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => return None,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(body)
+}
+
+fn contains_unrendered_command(source: &str) -> bool {
+    source
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'\\' && pair[1].is_ascii_alphabetic())
 }
 
 fn inline_row(rendered: &RenderedMath) -> Option<String> {
@@ -242,6 +355,9 @@ fn inline_row(rendered: &RenderedMath) -> Option<String> {
     if rendered.baseline >= rendered.rows.len()
         || rendered.rows.iter().any(|row| {
             row.contains('\\')
+                || row
+                    .chars()
+                    .any(|character| UnicodeWidthChar::width(character) != Some(1))
                 || row.chars().any(|character| {
                     matches!(
                         character,
