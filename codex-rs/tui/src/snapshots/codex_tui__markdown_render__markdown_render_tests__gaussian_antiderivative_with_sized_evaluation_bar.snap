@@ -1,0 +1,9 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: "plain_lines(&render_markdown_text(markdown)).join(\"\\n\")"
+---
+∞
+⌠  -r²          1   -r² ∞    1
+⎮ e   r dr = - ─── e   |  = ───.
+⌡               2       0    2
+0

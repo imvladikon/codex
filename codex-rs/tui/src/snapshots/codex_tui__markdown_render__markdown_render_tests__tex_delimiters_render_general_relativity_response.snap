@@ -3,9 +3,9 @@ source: tui/src/markdown_render_tests.rs
 expression: "plain_lines(&render_markdown_text(markdown)).join(\"\\n\")"
 ---
 ┌─────────────────────────────────┐
-│        12                8πG    │
-│ R   - ────Rg   + Λg   = ─────T  │
-│  μν         μν     μν    c⁴   μν│
+│        1                 8πG    │
+│ R   - ─── Rg   + Λg   = ─────T  │
+│  μν    2    μν     μν    c⁴   μν│
 └─────────────────────────────────┘
 
 - R₍μν₎ is the Ricci tensor.

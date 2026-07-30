@@ -171,6 +171,152 @@ fn completed_paragraph_does_not_hold_unmatched_literal_dollar() {
 }
 
 #[test]
+fn growing_paragraph_does_not_hold_unmatched_shell_variable() {
+    let (_, render) = assert_rich_stream_matches_full_render(
+        &[
+            "Use echo $HOME\n",
+            "Then run the next command\n",
+            "And continue explaining...",
+        ],
+        Some(/*width*/ 80),
+    );
+
+    assert_eq!(render.unclosed_math_start, None);
+}
+
+#[test]
+fn blockquoted_math_stays_mutable_until_its_closing_delimiter() {
+    let cwd = test_cwd();
+    let mut source = String::new();
+    let mut render = StreamingRender::new();
+
+    append_rich_and_assert_matches_full(
+        &mut render,
+        &mut source,
+        "> Formula $x +\n",
+        Some(/*width*/ 80),
+        &cwd,
+    );
+    assert_eq!(render.unclosed_math_start, Some(0));
+    append_rich_and_assert_matches_full(
+        &mut render,
+        &mut source,
+        "> y\n",
+        Some(/*width*/ 80),
+        &cwd,
+    );
+    assert_eq!(render.unclosed_math_start, Some(0));
+    append_rich_and_assert_matches_full(
+        &mut render,
+        &mut source,
+        "> z$.\n",
+        Some(/*width*/ 80),
+        &cwd,
+    );
+    assert_eq!(render.unclosed_math_start, None);
+    let lines = lines_to_plain_strings(&render.lines);
+    assert!(
+        lines.join("\n").contains("x + y z"),
+        "unexpected blockquote render: {lines:?}",
+    );
+}
+
+#[test]
+fn recompute_preserves_unclosed_math_byte_offset() {
+    let cwd = test_cwd();
+    let width = Some(80);
+    let prefix = "Préfixe terminé.\n\n";
+    let mut source = format!("{prefix}Formula $x");
+    let mut render = StreamingRender::new();
+
+    append(
+        &mut render,
+        &mut source,
+        "",
+        width,
+        &cwd,
+        HistoryRenderMode::Rich,
+    );
+    assert_eq!(render.unclosed_math_start, Some(prefix.len()));
+
+    render.recompute(
+        &source,
+        Some(32),
+        &cwd,
+        HistoryRenderMode::Rich,
+        /*inline_visualization_context*/ None,
+    );
+    assert_eq!(render.unclosed_math_start, Some(prefix.len()));
+
+    append_rich_and_assert_matches_full(
+        &mut render,
+        &mut source,
+        "$ is complete.\n",
+        Some(32),
+        &cwd,
+    );
+    assert_eq!(render.unclosed_math_start, None);
+}
+
+#[test]
+fn multiline_tex_display_stays_mutable_across_blank_lines() {
+    let cwd = test_cwd();
+    let width = Some(120);
+    let prefix = "Completed paragraph.\n\n";
+    let mut source = String::new();
+    let mut render = StreamingRender::new();
+
+    append_rich_and_assert_matches_full(
+        &mut render,
+        &mut source,
+        &format!("{prefix}\\[\n\\int_a^b f(x)\\,dx\n=\n\n"),
+        width,
+        &cwd,
+    );
+    assert_eq!(render.unclosed_math_start, Some(prefix.len()));
+
+    append_rich_and_assert_matches_full(
+        &mut render,
+        &mut source,
+        "\\left[F(x)\\right]_a^b\n-\n\nC\n",
+        width,
+        &cwd,
+    );
+    assert_eq!(render.unclosed_math_start, Some(prefix.len()));
+
+    append_rich_and_assert_matches_full(&mut render, &mut source, "\\]\n", width, &cwd);
+    assert_eq!(render.unclosed_math_start, None);
+    let rendered = lines_to_plain_strings(&render.lines).join("\n");
+    assert!(
+        !rendered.contains(r"\[") && !rendered.contains("# ["),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn protected_tex_openers_do_not_hold_streaming_output() {
+    for protected in [
+        r"`\(`",
+        "```\n\\[\n```",
+        r"[label](<https://example.test/\(>)",
+        r"![\(](image.png)",
+        r#"<span data-math="\(">html</span>"#,
+        r"\\(",
+    ] {
+        let (_, render) = assert_rich_stream_matches_full_render(
+            &[&format!("{protected}\n\n"), "Stable paragraph.\n"],
+            Some(/*width*/ 80),
+        );
+
+        assert_eq!(render.unclosed_math_start, None, "{protected:?}");
+        assert!(
+            render.stable_source_len > 0,
+            "stable prose was not committed after {protected:?}",
+        );
+    }
+}
+
+#[test]
 fn growing_single_top_level_blocks_render_and_scan_in_one_pass() {
     let streams: &[&[&str]] = &[
         &[

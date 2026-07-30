@@ -1,0 +1,16 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: rendered
+---
+[
+    [
+        "x & y",
+    ],
+    [
+        "pi & alpha",
+    ],
+    [
+        "a  b",
+        "c  d",
+    ],
+]

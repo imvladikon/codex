@@ -1330,6 +1330,47 @@ mod tests {
     }
 
     #[test]
+    fn controller_resize_preserves_unclosed_math_byte_holdback() {
+        let mut ctrl = stream_controller(Some(80));
+        let prefix = "Préfixe terminé.\n\n";
+        let initial = format!("{prefix}Formula $x\n");
+        assert!(ctrl.push(&initial));
+
+        ctrl.set_width(Some(32));
+        let (cell, _) = ctrl.on_commit_tick_batch(usize::MAX);
+        let mut emitted = cell
+            .into_iter()
+            .flat_map(|cell| cell.transcript_lines(u16::MAX))
+            .collect::<Vec<_>>();
+        let visible = lines_to_plain_strings(&emitted);
+        assert!(visible.iter().any(|line| line.contains("Préfixe terminé.")));
+        assert!(visible.iter().all(|line| !line.contains("Formula")));
+        assert_eq!(ctrl.core.render.unclosed_math_start, Some(prefix.len()));
+
+        let closing = "$ is complete.\n";
+        ctrl.push(closing);
+        if let (Some(cell), _) = ctrl.on_commit_tick_batch(usize::MAX) {
+            emitted.extend(cell.transcript_lines(u16::MAX));
+        }
+        let (cell, source) = ctrl.finalize();
+        if let Some(cell) = cell {
+            emitted.extend(cell.transcript_lines(u16::MAX));
+        }
+        let source = source.expect("finalized stream should retain its source");
+        assert_eq!(source, format!("{initial}{closing}"));
+
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&source, Some(/*width*/ 32), &mut rendered);
+        assert_eq!(
+            lines_to_plain_strings(&emitted)
+                .into_iter()
+                .map(|line| line.chars().skip(2).collect::<String>())
+                .collect::<Vec<_>>(),
+            lines_to_plain_strings(&rendered),
+        );
+    }
+
+    #[test]
     fn controller_emits_completed_prefix_before_unclosed_tex_math() {
         let mut ctrl = stream_controller(Some(80));
         let prefix = "Completed paragraph.\n\nFormula ";

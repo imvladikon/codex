@@ -6,6 +6,7 @@ use ratatui::text::Span;
 use ratatui::text::Text;
 use std::path::Path;
 
+use super::math;
 use crate::markdown_render::COLON_LOCATION_SUFFIX_RE;
 use crate::markdown_render::HASH_LOCATION_SUFFIX_RE;
 use crate::markdown_render::render_markdown_lines_with_width_and_cwd;
@@ -1922,8 +1923,6 @@ fn tex_delimiters_do_not_cross_any_structural_markdown_line() {
         "| STRUCTURE | value |\n| --- | --- |",
         "---\nSTRUCTURE",
         "<div>STRUCTURE</div>",
-        "    STRUCTURE",
-        "\tSTRUCTURE",
     ] {
         let markdown = format!("\\[\nx\n{structure}\ny\n\\]\n");
         let rendered = plain_lines(&render_markdown_text(&markdown));
@@ -2020,6 +2019,41 @@ fn tex_delimiters_do_not_cross_markdown_containers() {
 }
 
 #[test]
+fn native_math_does_not_cross_markdown_containers() {
+    let destination = "https://example.com/math";
+    let markdown = format!("$[label]({destination})$");
+    let lines = render_markdown_lines_with_width_and_cwd(
+        &markdown,
+        /*width*/ Some(120),
+        /*cwd*/ None,
+    );
+    let rendered = lines
+        .iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let hyperlinks = lines
+        .iter()
+        .flat_map(|line| line.hyperlinks.iter())
+        .map(|link| (link.columns.clone(), link.destination.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered, vec![format!("$label ({destination})$")]);
+    assert_eq!(
+        hyperlinks,
+        vec![
+            (1..6, destination),
+            (8..8 + destination.len(), destination),
+        ],
+    );
+}
+
+#[test]
 fn dollar_sign_in_link_destination_is_not_normalized() {
     let destination = "https://example.test/$HOME";
     let lines = render_markdown_lines_with_width_and_cwd(
@@ -2040,16 +2074,27 @@ fn dollar_sign_in_link_destination_is_not_normalized() {
 
 #[test]
 fn tex_display_delimiters_adjacent_to_newlines_do_not_leak_control_characters() {
-    for markdown in [r"\[
-x\]", r"\[x
-\]"] {
+    for (markdown, expected) in [
+        ("\\[\nx\\]", vec!["x"]),
+        ("\\[x\n\\]", vec!["x"]),
+        ("\\(\r\nx\r\n\\)", vec!["x"]),
+        ("\\[\r\nx\r\n\\]", vec!["x"]),
+        ("> \\[\r\n> x\r\n> \\]\r\n", vec!["> x"]),
+    ] {
         let rendered = plain_lines(&render_markdown_text(markdown));
 
-        assert_eq!(rendered, vec!["x"]);
         assert!(
             rendered
                 .iter()
                 .all(|line| !line.chars().any(char::is_control))
+        );
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>(),
+            expected,
         );
     }
 }
@@ -2079,6 +2124,175 @@ fn shell_variables_and_currency_ranges_stay_literal() {
             "changed literal dollars in {markdown:?}",
         );
     }
+}
+
+#[test]
+fn ordinary_operator_math_is_not_treated_as_shell_syntax() {
+    let rendered = ["$x=y$", "$x+y$", "$x-1$", "$x.y$", "$E=mc^2$", r"\(x=y\)"]
+        .map(|markdown| plain_lines(&render_markdown_text(markdown)));
+
+    assert_debug_snapshot!("ordinary_operator_math", rendered);
+}
+
+#[test]
+fn explicit_tex_displays_override_ambiguous_markdown_lines() {
+    for structure in ["=", "-"] {
+        let markdown = format!("\\[\nx\n{structure}\ny\n\\]\n");
+        let rendered = plain_lines(&render_markdown_text(&markdown)).join("\n");
+        assert!(
+            !rendered.contains(r"\[") && !rendered.contains(r"\]"),
+            "did not pair explicit TeX delimiters across {structure:?}: {rendered:?}",
+        );
+    }
+
+    let blockquote = "> \\[\n> x^2\n> \\]\n";
+    let rendered = plain_lines(&render_markdown_text(blockquote)).join("\n");
+    assert!(
+        rendered.contains("x²") && !rendered.contains(r"\[") && !rendered.contains(r"\]"),
+        "did not render TeX delimiters inside one blockquote paragraph: {rendered:?}",
+    );
+
+    let tight_list = "- \\[\n  x^2\n  \\]\n";
+    let rendered = plain_lines(&render_markdown_text(tight_list)).join("\n");
+    assert!(
+        rendered.contains("x²") && !rendered.contains(r"\[") && !rendered.contains(r"\]"),
+        "did not use the tight-list item region fallback: {rendered:?}",
+    );
+
+    let list_item = "\\[\nx\n-\titem\ny\n\\]\n";
+    let rendered = plain_lines(&render_markdown_text(list_item)).join("\n");
+    assert!(
+        rendered.contains('[') && rendered.contains(']'),
+        "paired TeX delimiters across a list item: {rendered:?}",
+    );
+
+    let reference_definition =
+        "\\[\nx\n[formula]: https://example.test/math\ny\n\\]\n";
+    let rendered = plain_lines(&render_markdown_text(reference_definition)).join("\n");
+    assert!(
+        rendered.contains('[') && rendered.contains(']'),
+        "paired TeX delimiters across a reference definition: {rendered:?}",
+    );
+}
+
+#[test]
+fn unbraced_fraction_never_merges_distinct_tex_arguments() {
+    let rendered = plain_lines(&render_markdown_text(r"$$\frac12$$"));
+
+    assert_eq!(
+        rendered
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
+        vec!["1", "───", "2"],
+    );
+}
+
+#[test]
+fn ambiguous_barewords_preserve_strict_latex_semantics() {
+    for markdown in ["$pi$", "$alpha+beta$", "$sqrt(x)$"] {
+        assert_eq!(
+            plain_lines(&render_markdown_text(markdown)).join("\n"),
+            markdown,
+        );
+    }
+}
+
+#[test]
+fn literal_slash_math_stays_inline() {
+    assert_eq!(
+        plain_lines(&render_markdown_text(r"\(a/b=dq/dt\)")),
+        vec!["a/b = dq/dt"],
+    );
+}
+
+#[test]
+fn malformed_math_preserves_exact_source() {
+    for markdown in [
+        "$x}}}$",
+        r"$\frac{a$",
+        r"$\sqrt[3]{x}$",
+        "$x & y$",
+        r"$$\begin{matrix}a & b$$",
+    ] {
+        assert_eq!(
+            plain_lines(&render_markdown_text(markdown)).join("\n"),
+            markdown,
+        );
+    }
+}
+
+#[test]
+fn strict_latex_validation_preserves_supported_text_and_matrix_syntax() {
+    let rendered = [
+        r"$x \& y$",
+        r"$\text{pi & alpha}$",
+        r"$$\begin{matrix}a & b \\ c & d\end{matrix}$$",
+    ]
+    .map(|markdown| plain_lines(&render_markdown_text(markdown)));
+
+    assert_debug_snapshot!("strict_latex_supported_syntax", rendered);
+}
+
+#[test]
+fn gaussian_antiderivative_with_sized_evaluation_bar_renders() {
+    let markdown = concat!(
+        "\\[\n",
+        "\\int_0^\\infty e^{-r^2}r\\,dr\n",
+        "=\n",
+        "-\\frac12 e^{-r^2}\\bigg|_0^\\infty\n",
+        "=\n",
+        "\\frac12.\n",
+        "\\]\n",
+    );
+
+    assert_snapshot!(
+        "gaussian_antiderivative_with_sized_evaluation_bar",
+        plain_lines(&render_markdown_text(markdown)).join("\n"),
+    );
+}
+
+#[test]
+fn dollar_classifier_accepts_ordinary_operator_corpus() {
+    let names = [
+        "a", "b", "x", "y", "z", "E", "mc", "x_1", "x_2", "alpha", "beta", "gamma",
+        "delta", "theta", "lambda", "sigma", "omega", "left", "right", "value",
+    ];
+    let operators = ["=", "+", "-", ".", "/", "*", "<"];
+    let right_hand_sides = ["0", "1", "2", "x", "y", "beta", "x_2"];
+
+    for name in names {
+        for operator in operators {
+            for right_hand_side in right_hand_sides {
+                let source = format!("{name}{operator}{right_hand_side}");
+                let markdown = format!("${source}$");
+                assert!(
+                    !math::looks_like_literal_dollars(&markdown, &source, &(0..markdown.len())),
+                    "classified ordinary math as shell syntax: {markdown:?}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn boxed_math_respects_the_rendered_row_limit() {
+    let rows = std::iter::repeat_n("x", 24).collect::<Vec<_>>().join(r" \\ ");
+    let markdown = format!(r"$$\boxed{{\begin{{matrix}}{rows}\end{{matrix}}}}$$");
+
+    assert_eq!(
+        plain_lines(&render_markdown_text(&markdown)).join("\n"),
+        markdown,
+    );
+}
+
+#[test]
+fn boxed_math_pads_wide_glyphs_by_display_columns() {
+    assert_debug_snapshot!(
+        "boxed_math_pads_wide_glyphs_by_display_columns",
+        plain_lines(&render_markdown_text(r"$$\boxed{\text{漢字}}$$")),
+    );
 }
 
 #[test]

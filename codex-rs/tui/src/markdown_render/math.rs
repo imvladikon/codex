@@ -1,5 +1,7 @@
 use super::HyperlinkLine;
 use super::Writer;
+use crate::width::char_width;
+use crate::width::display_width;
 use pulldown_cmark::CowStr;
 use pulldown_cmark::Event;
 use ratatui::text::Line;
@@ -7,10 +9,9 @@ use ratatui::text::Span;
 use std::borrow::Cow;
 use std::ops::Range;
 use std::panic::catch_unwind;
-use unicode_width::UnicodeWidthChar;
-use unicode_width::UnicodeWidthStr;
 
 mod normalization;
+mod validation;
 
 pub(super) use normalization::normalize_tex_delimiters;
 pub(super) use normalization::restore_literal_dollars;
@@ -38,7 +39,7 @@ where
         self.line_ends_with_local_link_target = false;
         let original = self.input.get(range.clone()).unwrap_or_default();
         let source = source_body(&source, original);
-        if looks_like_literal_dollars(self.input, source, &range) {
+        if original.starts_with('$') && looks_like_literal_dollars(self.input, source, &range) {
             self.text(self.raw_math(source, range, /*display*/ false).into());
             return;
         }
@@ -52,7 +53,7 @@ where
         };
         if self
             .available_math_width()
-            .is_some_and(|width| UnicodeWidthStr::width(row.as_str()) > width)
+            .is_some_and(|width| display_width(&row) > width)
         {
             self.text(self.raw_math(source, range, /*display*/ false).into());
             return;
@@ -185,15 +186,7 @@ pub(super) fn looks_like_literal_dollars(input: &str, source: &str, range: &Rang
     let shell_variable = source
         .strip_suffix([':', '/', ';', '-', '=', '.', '+'])
         .is_some_and(is_shell_variable)
-        && starts_with_shell_variable(suffix)
-        || split_shell_variable(source).is_some_and(|(variable, remainder)| {
-            (remainder.is_empty()
-                && variable.len() > 1
-                && variable
-                    .chars()
-                    .all(|character| character == '_' || character.is_ascii_uppercase()))
-                || remainder.starts_with([':', '/', ';', '-', '=', '.', '+'])
-        });
+        && starts_with_shell_variable(suffix);
     currency || shell_variable
 }
 
@@ -248,7 +241,7 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
             .any(|byte| matches!(*byte, b'$' | LITERAL_DOLLAR_SENTINEL))
         || source
             .chars()
-            .any(|character| UnicodeWidthChar::width(character) == Some(0))
+            .any(|character| !matches!(character, '\r' | '\n') && char_width(character) == 0)
         || [r"\(", r"\)", r"\[", r"\]"]
             .into_iter()
             .any(|delimiter| source.contains(delimiter))
@@ -256,7 +249,7 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
         return None;
     }
 
-    let source = source.trim();
+    let source = validation::normalize_strict_latex(source.trim())?;
     let source = if source.contains(['\r', '\n']) || source.contains(r"\operatorname{") {
         Cow::Owned(
             source
@@ -264,12 +257,17 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
                 .replace(r"\operatorname{", r"\mathrm{"),
         )
     } else {
-        Cow::Borrowed(source)
+        source
     };
     let (source, boxed) = strip_outer_box(&source)
         .map(|source| (source, true))
         .unwrap_or((&source, false));
-    let block = catch_unwind(|| term_maths::render(source)).ok()?;
+    let source = if source.contains(r"\boxed{") {
+        Cow::Owned(source.replace(r"\boxed{", "{"))
+    } else {
+        Cow::Borrowed(source)
+    };
+    let block = catch_unwind(|| term_maths::render(&source)).ok()?;
     if block.height() == 0
         || block.height() > MAX_MATH_ROWS
         || block.width() == 0
@@ -290,35 +288,27 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
         })
         .collect::<Vec<_>>();
     if rows.iter().any(|row| {
-        contains_unrendered_command(row)
-            || row
-                .chars()
-                .any(|character| UnicodeWidthChar::width(character) == Some(0))
+        contains_unrendered_command(row) || row.chars().any(|character| char_width(character) == 0)
     }) {
         return None;
     }
     let mut baseline = block.baseline();
     if boxed {
-        let inner_width = rows
-            .iter()
-            .map(|row| UnicodeWidthStr::width(row.as_str()))
-            .max()
-            .unwrap_or(0);
+        let inner_width = rows.iter().map(|row| display_width(row)).max().unwrap_or(0);
         let mut boxed_rows = Vec::with_capacity(rows.len() + 2);
         boxed_rows.push(format!("┌{}┐", "─".repeat(inner_width)));
         boxed_rows.extend(rows.into_iter().map(|row| {
-            let padding = inner_width.saturating_sub(UnicodeWidthStr::width(row.as_str()));
+            let padding = inner_width.saturating_sub(display_width(&row));
             format!("│{row}{}│", " ".repeat(padding))
         }));
         boxed_rows.push(format!("└{}┘", "─".repeat(inner_width)));
         rows = boxed_rows;
         baseline += 1;
     }
-    let width = rows
-        .iter()
-        .map(|row| UnicodeWidthStr::width(row.as_str()))
-        .max()
-        .unwrap_or(0);
+    if rows.len() > MAX_MATH_ROWS || baseline >= rows.len() {
+        return None;
+    }
+    let width = rows.iter().map(|row| display_width(row)).max().unwrap_or(0);
     (width > 0 && width <= MAX_MATH_COLUMNS).then_some(RenderedMath {
         rows,
         width,
@@ -355,9 +345,7 @@ fn inline_row(rendered: &RenderedMath) -> Option<String> {
     if rendered.baseline >= rendered.rows.len()
         || rendered.rows.iter().any(|row| {
             row.contains('\\')
-                || row
-                    .chars()
-                    .any(|character| UnicodeWidthChar::width(character) != Some(1))
+                || row.chars().any(|character| char_width(character) != 1)
                 || row.chars().any(|character| {
                     matches!(
                         character,
@@ -484,3 +472,7 @@ fn has_excessive_nesting(source: &str) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+#[path = "math_tests.rs"]
+mod tests;

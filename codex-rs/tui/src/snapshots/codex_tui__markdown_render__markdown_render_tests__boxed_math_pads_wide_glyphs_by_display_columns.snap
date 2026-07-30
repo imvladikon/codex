@@ -1,0 +1,9 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: "plain_lines(&render_markdown_text(r\"$$\\boxed{\\text{漢字}}$$\"))"
+---
+[
+    "┌────┐",
+    "│漢字│",
+    "└────┘",
+]

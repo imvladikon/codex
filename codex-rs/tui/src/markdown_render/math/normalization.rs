@@ -23,6 +23,24 @@ struct DelimiterPair {
 struct NativeMathRanges {
     literal_dollars: Vec<usize>,
     literal_math: Vec<Range<usize>>,
+    unclosed_candidates: Vec<usize>,
+}
+
+struct MarkdownRanges {
+    text: Vec<Range<usize>>,
+    containers: Vec<Range<usize>>,
+    math_regions: Vec<Range<usize>>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MathRegionKind {
+    Primary,
+    ItemFallback,
+}
+
+struct MathRegionFrame {
+    kind: MathRegionKind,
+    range: Range<usize>,
 }
 
 pub(in crate::markdown_render) fn restore_literal_dollars(text: CowStr<'_>) -> CowStr<'_> {
@@ -41,30 +59,46 @@ pub(in crate::markdown_render) fn normalize_tex_delimiters(input: &str) -> Norma
         };
     }
 
-    let (text_ranges, containers) = markdown_ranges(input);
-    let mut native_math = native_math_ranges(input);
+    let markdown = markdown_ranges(input);
+    let mut native_math = native_math_ranges(input, &markdown.containers);
     native_math
         .literal_dollars
-        .retain(|&offset| is_text_source(offset..offset + 1, &text_ranges));
+        .retain(|&offset| is_text_source(offset..offset + 1, &markdown.text));
+    native_math
+        .unclosed_candidates
+        .retain(|&offset| is_text_source(offset..offset + 1, &markdown.text));
     let mut pairs = Vec::new();
-    let mut unclosed_math_start = None;
-    for region in math_regions(input) {
-        let (display_pairs, unclosed_display) =
-            collect_paired_delimiters(input, &region, &text_ranges, &containers, b'[', b']');
-        let (inline_pairs, unclosed_inline) =
-            collect_paired_delimiters(input, &region, &text_ranges, &containers, b'(', b')');
-        pairs.extend(display_pairs.into_iter().map(|pair| (pair, b'[', b']')));
+    let full_input = 0..input.len();
+    let (display_pairs, unclosed_display) = collect_paired_delimiters(
+        input,
+        &full_input,
+        &markdown.text,
+        &markdown.containers,
+        b'[',
+        b']',
+    );
+    pairs.extend(display_pairs.into_iter().map(|pair| (pair, b'[', b']')));
+    let mut unclosed_math_start = unclosed_display;
+    for region in markdown.math_regions {
+        let (inline_pairs, unclosed_inline) = collect_paired_delimiters(
+            input,
+            &region,
+            &markdown.text,
+            &markdown.containers,
+            b'(',
+            b')',
+        );
         pairs.extend(inline_pairs.into_iter().map(|pair| (pair, b'(', b')')));
 
-        if region.end == input.len() {
-            unclosed_math_start = [
-                unclosed_display,
-                unclosed_inline,
-                unclosed_native_math_start(&region, &native_math.literal_dollars),
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+        if input[region.end..].trim().is_empty() {
+            unclosed_math_start = unclosed_math_start
+                .into_iter()
+                .chain(unclosed_inline)
+                .chain(unclosed_native_math_start(
+                    &region,
+                    &native_math.unclosed_candidates,
+                ))
+                .min();
         }
     }
     pairs.sort_by_key(|(pair, _, _)| pair.open_offset);
@@ -95,18 +129,29 @@ pub(in crate::markdown_render) fn normalize_tex_delimiters(input: &str) -> Norma
     for range in native_math.literal_math {
         normalized[range.start] = LITERAL_DOLLAR_SENTINEL;
         let close_offset = range.end.saturating_sub(1);
-        if is_text_source(close_offset..range.end, &text_ranges) {
+        if is_text_source(close_offset..range.end, &markdown.text) {
             normalized[close_offset] = LITERAL_DOLLAR_SENTINEL;
         }
     }
     for (pair, open, close) in pairs {
         match (open, close) {
             (b'[', b']') => {
-                normalize_display_whitespace(&mut normalized, &pair);
+                normalize_multiline_math_whitespace(
+                    &mut normalized,
+                    pair.open_offset + 2,
+                    pair.close_offset,
+                    &markdown.text,
+                );
                 normalized[pair.open_offset..pair.open_offset + 2].copy_from_slice(b"$$");
                 normalized[pair.close_offset..pair.close_offset + 2].copy_from_slice(b"$$");
             }
             (b'(', b')') => {
+                normalize_multiline_math_whitespace(
+                    &mut normalized,
+                    pair.open_offset + 2,
+                    pair.close_offset,
+                    &markdown.text,
+                );
                 normalized[pair.open_offset..pair.open_offset + 2].copy_from_slice(b"${");
                 normalized[pair.close_offset..pair.close_offset + 2].copy_from_slice(b"}$");
             }
@@ -122,39 +167,141 @@ pub(in crate::markdown_render) fn normalize_tex_delimiters(input: &str) -> Norma
     }
 }
 
-fn markdown_ranges(input: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
+fn markdown_ranges(input: &str) -> MarkdownRanges {
     let mut text_ranges = Vec::new();
     let mut containers = Vec::new();
+    let mut math_regions = Vec::new();
+    let mut region_stack = Vec::new();
     let mut protected_depth = 0usize;
     let mut options = markdown_options();
     options.remove(Options::ENABLE_MATH);
-    for (event, range) in Parser::new_ext(input, options).into_offset_iter() {
+    let parser = Parser::new_ext(input, options);
+    containers.extend(
+        parser
+            .reference_definitions()
+            .iter()
+            .map(|(_, definition)| definition.span.clone()),
+    );
+    for (event, range) in parser.into_offset_iter() {
         match event {
-            Event::Start(
-                Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::Image { .. } | Tag::MetadataBlock(_),
-            ) => protected_depth += 1,
+            Event::Start(tag) => match tag {
+                Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::Image { .. } | Tag::MetadataBlock(_) => {
+                    protected_depth += 1;
+                    containers.push(range);
+                }
+                Tag::Link { .. } => containers.push(range),
+                Tag::BlockQuote(_) => containers.push(range),
+                Tag::Paragraph => region_stack.push(MathRegionFrame {
+                    kind: MathRegionKind::Primary,
+                    range,
+                }),
+                Tag::Heading { .. } => {
+                    if starts_with_atx_heading(input, &range)
+                        || ends_with_long_setext_underline(input, &range)
+                    {
+                        containers.push(range.clone());
+                    }
+                    region_stack.push(MathRegionFrame {
+                        kind: MathRegionKind::Primary,
+                        range,
+                    });
+                }
+                Tag::TableCell => {
+                    containers.push(range.clone());
+                    region_stack.push(MathRegionFrame {
+                        kind: MathRegionKind::Primary,
+                        range,
+                    });
+                }
+                Tag::Item => {
+                    containers.push(range.clone());
+                    region_stack.push(MathRegionFrame {
+                        kind: MathRegionKind::ItemFallback,
+                        range,
+                    });
+                }
+                _ => {}
+            },
             Event::End(
                 TagEnd::CodeBlock | TagEnd::HtmlBlock | TagEnd::Image | TagEnd::MetadataBlock(_),
             ) => protected_depth = protected_depth.saturating_sub(1),
-            Event::Start(Tag::Link { .. } | Tag::TableCell) => containers.push(range),
-            Event::Text(_) if protected_depth == 0 => text_ranges.push(range),
+            Event::End(
+                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::TableCell | TagEnd::Item,
+            ) => {
+                region_stack.pop();
+            }
+            Event::Text(_) if protected_depth == 0 => {
+                text_ranges.push(range);
+                if let Some(frame) = region_stack
+                    .iter()
+                    .rev()
+                    .find(|frame| frame.kind == MathRegionKind::Primary)
+                    .or_else(|| region_stack.last())
+                {
+                    math_regions.push(frame.range.clone());
+                }
+            }
+            Event::Code(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::FootnoteReference(_)
+            | Event::Rule => {
+                containers.push(range);
+            }
             _ => {}
         }
     }
-    (text_ranges, containers)
+    math_regions.sort_by_key(|range| (range.start, range.end));
+    math_regions.dedup();
+    MarkdownRanges {
+        text: text_ranges,
+        containers,
+        math_regions,
+    }
 }
 
-fn native_math_ranges(input: &str) -> NativeMathRanges {
+fn starts_with_atx_heading(input: &str, range: &Range<usize>) -> bool {
+    input[range.clone()]
+        .trim_start_matches([' ', '\t'])
+        .starts_with('#')
+}
+
+fn ends_with_long_setext_underline(input: &str, range: &Range<usize>) -> bool {
+    let Some(underline) = input[range.clone()]
+        .trim_end_matches(['\r', '\n'])
+        .rsplit('\n')
+        .next()
+        .map(str::trim)
+    else {
+        return false;
+    };
+    underline.len() > 1
+        && (underline.bytes().all(|byte| byte == b'=')
+            || underline.bytes().all(|byte| byte == b'-'))
+}
+
+fn native_math_ranges(input: &str, containers: &[Range<usize>]) -> NativeMathRanges {
     let mut literal_dollars = Vec::new();
     let mut literal_math = Vec::new();
+    let mut unclosed_candidates = Vec::new();
     for (event, range) in Parser::new_ext(input, markdown_options()).into_offset_iter() {
         match event {
             Event::Text(_) => {
-                literal_dollars.extend(range.filter(|&offset| {
+                for offset in range.filter(|&offset| {
                     input.as_bytes()[offset] == b'$' && !is_escaped(input.as_bytes(), offset)
-                }));
+                }) {
+                    literal_dollars.push(offset);
+                    if !looks_like_unmatched_literal_dollar(input, offset) {
+                        unclosed_candidates.push(offset);
+                    }
+                }
             }
-            Event::InlineMath(source) if looks_like_literal_dollars(input, &source, &range) => {
+            Event::InlineMath(source)
+                if looks_like_literal_dollars(input, &source, &range)
+                    || range.end.checked_sub(1).is_some_and(|close_offset| {
+                        crosses_container_boundary(range.start, close_offset, containers)
+                    }) =>
+            {
                 literal_math.push(range);
             }
             _ => {}
@@ -163,81 +310,19 @@ fn native_math_ranges(input: &str) -> NativeMathRanges {
     NativeMathRanges {
         literal_dollars,
         literal_math,
+        unclosed_candidates,
     }
 }
 
-fn math_regions(input: &str) -> Vec<Range<usize>> {
-    let mut regions = Vec::new();
-    let mut region_start = None;
-    let mut line_start = 0;
-    for line in input.split_inclusive('\n') {
-        let line_without_ending = line.strip_suffix('\n').unwrap_or(line);
-        let line_without_ending = line_without_ending
-            .strip_suffix('\r')
-            .unwrap_or(line_without_ending);
-        if line_without_ending.trim().is_empty() {
-            if let Some(start) = region_start.take() {
-                regions.push(start..line_start);
-            }
-        } else if is_markdown_block_start(line_without_ending)
-            && let Some(start) = region_start.replace(line_start)
-            && start < line_start
-        {
-            regions.push(start..line_start);
-        } else {
-            region_start.get_or_insert(line_start);
-        }
-        line_start += line.len();
-    }
-    if let Some(start) = region_start {
-        regions.push(start..input.len());
-    }
-    regions
-}
-
-fn is_markdown_block_start(line: &str) -> bool {
-    let indentation = line
-        .len()
-        .saturating_sub(line.trim_start_matches(' ').len());
-    if indentation >= 4 || line[indentation..].starts_with('\t') {
+fn looks_like_unmatched_literal_dollar(input: &str, offset: usize) -> bool {
+    let suffix = &input[offset + 1..];
+    if suffix.starts_with(|character: char| character.is_ascii_digit()) {
         return true;
     }
-    let line = &line[indentation..];
-    let heading = line.starts_with('#')
-        && line
-            .trim_start_matches('#')
-            .strip_prefix([' ', '\t'])
-            .is_some()
-        && line
-            .len()
-            .saturating_sub(line.trim_start_matches('#').len())
-            <= 6;
-    let unordered_list = ["- ", "* ", "+ "]
-        .into_iter()
-        .any(|marker| line.starts_with(marker));
-    let ordered_list = line.find(['.', ')']).is_some_and(|offset| {
-        offset > 0
-            && line[..offset].bytes().all(|byte| byte.is_ascii_digit())
-            && line[offset + 1..].starts_with([' ', '\t'])
-    });
-    let thematic_break = ['*', '-', '_'].into_iter().any(|marker| {
-        line.chars()
-            .all(|character| character == marker || matches!(character, ' ' | '\t'))
-            && line
-                .chars()
-                .filter(|character| *character == marker)
-                .count()
-                >= 3
-    });
-    heading
-        || unordered_list
-        || ordered_list
-        || thematic_break
-        || line.starts_with('>')
-        || line.starts_with("```")
-        || line.starts_with("~~~")
-        || line.starts_with('|')
-        || line.starts_with('<')
+    let Some((variable, _)) = super::split_shell_variable(suffix) else {
+        return false;
+    };
+    suffix.starts_with('{') || variable.chars().count() > 1
 }
 
 fn collect_paired_delimiters(
@@ -276,19 +361,48 @@ fn collect_paired_delimiters(
         }
         index += 2;
     }
-    (pairs, open_offset)
+    let unclosed = open_offset.filter(|&start| {
+        block
+            .end
+            .checked_sub(1)
+            .is_some_and(|end| !crosses_container_boundary(start, end, containers))
+    });
+    (pairs, unclosed)
 }
 
-fn normalize_display_whitespace(normalized: &mut [u8], pair: &DelimiterPair) {
-    for byte in &mut normalized[pair.open_offset + 2..pair.close_offset] {
+fn normalize_multiline_math_whitespace(
+    normalized: &mut [u8],
+    content_start: usize,
+    content_end: usize,
+    text_ranges: &[Range<usize>],
+) {
+    for offset in content_start..content_end {
+        if normalized[offset] == b'>'
+            && !is_text_source(offset..offset + 1, text_ranges)
+            && is_blockquote_marker(normalized, offset)
+        {
+            normalized[offset] = b' ';
+        }
+    }
+    for byte in &mut normalized[content_start..content_end] {
         if matches!(*byte, b'\r' | b'\n') {
             *byte = b' ';
         }
     }
 }
 
-fn unclosed_native_math_start(block: &Range<usize>, literal_dollars: &[usize]) -> Option<usize> {
-    literal_dollars
+fn is_blockquote_marker(source: &[u8], offset: usize) -> bool {
+    let line_start = source[..offset]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |line_end| line_end + 1);
+    source[line_start..offset]
+        .iter()
+        .all(|byte| matches!(*byte, b' ' | b'\t' | b'>'))
+}
+
+fn unclosed_native_math_start(block: &Range<usize>, candidates: &[usize]) -> Option<usize> {
+    candidates
         .iter()
         .copied()
         .find(|offset| block.contains(offset))
@@ -325,3 +439,7 @@ fn is_escaped(bytes: &[u8], offset: usize) -> bool {
         .count();
     !preceding_backslashes.is_multiple_of(2)
 }
+
+#[cfg(test)]
+#[path = "normalization_tests.rs"]
+mod tests;
