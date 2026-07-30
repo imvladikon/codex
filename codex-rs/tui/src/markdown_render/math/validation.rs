@@ -11,6 +11,37 @@ pub(super) fn normalize_strict_latex(source: &str) -> Option<Cow<'_, str>> {
     normalize_literal_slashes(source)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OuterBox<'a> {
+    pub(super) body: &'a str,
+    pub(super) trailing_punctuation: &'a str,
+}
+
+pub(super) fn parse_normalized_outer_box(source: &str) -> Option<OuterBox<'_>> {
+    let source = source.trim();
+    let (command, command_end) = alphabetic_command_at(source, /*offset*/ 0)?;
+    if command != "boxed" {
+        return None;
+    }
+
+    let argument = next_argument(source, command_end)?;
+    if !argument.braced {
+        return None;
+    }
+    let trailing_punctuation = source[argument.end..].trim();
+    if !trailing_punctuation
+        .bytes()
+        .all(|byte| matches!(byte, b'.' | b',' | b';' | b':' | b'!' | b'?'))
+    {
+        return None;
+    }
+
+    Some(OuterBox {
+        body: &source[argument.start + 1..argument.end - 1],
+        trailing_punctuation,
+    })
+}
+
 fn validate_structure(source: &str) -> Option<()> {
     validate_balanced_braces(source)?;
 

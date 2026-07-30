@@ -259,9 +259,10 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
     } else {
         source
     };
-    let (source, boxed) = strip_outer_box(&source)
-        .map(|source| (source, true))
-        .unwrap_or((&source, false));
+    let (source, boxed_suffix) = match validation::parse_normalized_outer_box(&source) {
+        Some(outer_box) => (outer_box.body, Some(outer_box.trailing_punctuation)),
+        None => (source.as_ref(), None),
+    };
     if source.contains(r"\boxed{") {
         return None;
     }
@@ -292,7 +293,7 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
         return None;
     }
     let mut baseline = block.baseline();
-    if boxed {
+    if let Some(suffix) = boxed_suffix {
         let inner_width = rows.iter().map(|row| display_width(row)).max().unwrap_or(0);
         let mut boxed_rows = Vec::with_capacity(rows.len() + 2);
         boxed_rows.push(format!("┌{}┐", "─".repeat(inner_width)));
@@ -301,8 +302,9 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
             format!("│{row}{}│", " ".repeat(padding))
         }));
         boxed_rows.push(format!("└{}┘", "─".repeat(inner_width)));
-        rows = boxed_rows;
         baseline += 1;
+        boxed_rows.get_mut(baseline)?.push_str(suffix);
+        rows = boxed_rows;
     }
     if rows.len() > MAX_MATH_ROWS || baseline >= rows.len() {
         return None;
@@ -313,21 +315,6 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
         width,
         baseline,
     })
-}
-
-fn strip_outer_box(source: &str) -> Option<&str> {
-    let source = source.trim();
-    let body = source.strip_prefix(r"\boxed{")?.strip_suffix('}')?;
-    let mut depth = 0usize;
-    for byte in body.bytes() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' if depth == 0 => return None,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-    }
-    (depth == 0).then_some(body)
 }
 
 fn inline_row(rendered: &RenderedMath) -> Option<String> {

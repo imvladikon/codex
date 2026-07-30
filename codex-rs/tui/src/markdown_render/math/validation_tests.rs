@@ -2,6 +2,31 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
+fn parses_outer_box_with_nested_arguments_and_trailing_punctuation() {
+    assert_eq!(
+        parse_normalized_outer_box(r"\boxed{\frac{a}{b}}."),
+        Some(OuterBox {
+            body: r"\frac{a}{b}",
+            trailing_punctuation: ".",
+        }),
+    );
+    assert_eq!(
+        parse_normalized_outer_box("  \\boxed{\\text{a {nested} value}}?!  "),
+        Some(OuterBox {
+            body: r"\text{a {nested} value}",
+            trailing_punctuation: "?!",
+        }),
+    );
+}
+
+#[test]
+fn rejects_non_outer_box_and_non_punctuation_suffix() {
+    for source in [r"x+\boxed{y}", r"\boxed{x}+y"] {
+        assert_eq!(parse_normalized_outer_box(source), None, "{source:?}",);
+    }
+}
+
+#[test]
 fn normalizes_unbraced_fraction_tokens() {
     assert_eq!(
         normalize_strict_latex(r"\frac12"),

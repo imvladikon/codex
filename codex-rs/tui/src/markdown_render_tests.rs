@@ -1857,6 +1857,17 @@ fn tex_delimiters_render_general_relativity_response() {
 }
 
 #[test]
+fn boxed_display_math_renders_trailing_punctuation_outside_box() {
+    let markdown = concat!(
+        "\\[\n",
+        "\\boxed{\\nabla^\\mu T_{\\mu\\nu}=0}.\n",
+        "\\]\n",
+    );
+
+    assert_snapshot!(plain_lines(&render_markdown_text(markdown)).join("\n"));
+}
+
+#[test]
 fn tex_inline_delimiters_render_and_preserve_unrendered_source() {
     let text = render_markdown_text(
         r"Rendered \(x^2\), multiline \(\frac{a}{b}\), literal `\(z^2\)`.",
