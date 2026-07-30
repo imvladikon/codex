@@ -12,34 +12,68 @@ pub(super) fn normalize_strict_latex(source: &str) -> Option<Cow<'_, str>> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct OuterBox<'a> {
-    pub(super) body: &'a str,
-    pub(super) trailing_punctuation: &'a str,
+pub(super) enum NormalizedMathSegment<'a> {
+    Unboxed(&'a str),
+    Boxed(&'a str),
 }
 
-pub(super) fn parse_normalized_outer_box(source: &str) -> Option<OuterBox<'_>> {
-    let source = source.trim();
-    let (command, command_end) = alphabetic_command_at(source, /*offset*/ 0)?;
-    if command != "boxed" {
+pub(super) fn split_normalized_top_level_boxes(
+    source: &str,
+) -> Option<Vec<NormalizedMathSegment<'_>>> {
+    let mut segments = Vec::new();
+    let mut copied_until = 0;
+    let mut brace_depth = 0usize;
+    let mut offset = 0;
+    while offset < source.len() {
+        if source.as_bytes()[offset] == b'\\'
+            && let Some((command, command_end)) = alphabetic_command_at(source, offset)
+        {
+            if command == "text" {
+                offset = next_argument(source, command_end)?.end;
+                continue;
+            }
+            if command == "boxed" && brace_depth == 0 {
+                let argument = next_argument(source, command_end)?;
+                if !argument.braced {
+                    return None;
+                }
+                if copied_until < offset {
+                    segments.push(NormalizedMathSegment::Unboxed(
+                        &source[copied_until..offset],
+                    ));
+                }
+                segments.push(NormalizedMathSegment::Boxed(
+                    &source[argument.start + 1..argument.end - 1],
+                ));
+                copied_until = argument.end;
+                offset = argument.end;
+                continue;
+            }
+            offset = command_end;
+            continue;
+        }
+
+        let character = source[offset..].chars().next()?;
+        if !is_escaped(source.as_bytes(), offset) {
+            match character {
+                '{' => brace_depth += 1,
+                '}' => brace_depth = brace_depth.checked_sub(1)?,
+                _ => {}
+            }
+        }
+        offset += character.len_utf8();
+    }
+    if brace_depth != 0 {
         return None;
     }
 
-    let argument = next_argument(source, command_end)?;
-    if !argument.braced {
-        return None;
+    if copied_until < source.len() {
+        segments.push(NormalizedMathSegment::Unboxed(&source[copied_until..]));
     }
-    let trailing_punctuation = source[argument.end..].trim();
-    if !trailing_punctuation
-        .bytes()
-        .all(|byte| matches!(byte, b'.' | b',' | b';' | b':' | b'!' | b'?'))
-    {
-        return None;
+    if segments.is_empty() {
+        segments.push(NormalizedMathSegment::Unboxed(source));
     }
-
-    Some(OuterBox {
-        body: &source[argument.start + 1..argument.end - 1],
-        trailing_punctuation,
-    })
+    Some(segments)
 }
 
 fn validate_structure(source: &str) -> Option<()> {
@@ -199,6 +233,15 @@ fn normalize_latex_aliases(source: Cow<'_, str>) -> Option<Cow<'_, str>> {
             && let Some(argument) = next_argument(&source, command_end)
         {
             offset = argument.end;
+            continue;
+        }
+        if matches!(
+            command,
+            "displaystyle" | "textstyle" | "scriptstyle" | "scriptscriptstyle"
+        ) {
+            let replacement_end = skip_whitespace(&source, command_end);
+            replacements.push((offset..replacement_end, String::new()));
+            offset = replacement_end;
             continue;
         }
         if matches!(command, "xrightarrow" | "xleftarrow") {

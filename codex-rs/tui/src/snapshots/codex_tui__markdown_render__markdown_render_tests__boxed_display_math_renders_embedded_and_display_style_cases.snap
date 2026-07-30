@@ -1,0 +1,17 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: "plain_lines(&render_markdown_text(markdown)).join(\"\\n\")"
+---
+                             ┌────┐
+              π³             │ π³ │
+I = F''(1) = ────(1·0 + 1) = │────│.
+              8              │ 8  │
+                             └────┘
+
+┌───────────────────┐
+│∞                  │
+│⌠ ln² x         π³ │
+│⎮──────── dx = ────│
+│⌡ 1 + x²        8  │
+│0                  │
+└───────────────────┘

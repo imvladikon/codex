@@ -259,14 +259,7 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
     } else {
         source
     };
-    let (source, boxed_suffix) = match validation::parse_normalized_outer_box(&source) {
-        Some(outer_box) => (outer_box.body, Some(outer_box.trailing_punctuation)),
-        None => (source.as_ref(), None),
-    };
-    if source.contains(r"\boxed{") {
-        return None;
-    }
-    let block = catch_unwind(|| term_maths::render(source)).ok()?;
+    let block = render_normalized(&source)?;
     if block.height() == 0
         || block.height() > MAX_MATH_ROWS
         || block.width() == 0
@@ -275,7 +268,7 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
         return None;
     }
 
-    let mut rows = block
+    let rows = block
         .cells()
         .iter()
         .map(|row| {
@@ -292,20 +285,7 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
     {
         return None;
     }
-    let mut baseline = block.baseline();
-    if let Some(suffix) = boxed_suffix {
-        let inner_width = rows.iter().map(|row| display_width(row)).max().unwrap_or(0);
-        let mut boxed_rows = Vec::with_capacity(rows.len() + 2);
-        boxed_rows.push(format!("┌{}┐", "─".repeat(inner_width)));
-        boxed_rows.extend(rows.into_iter().map(|row| {
-            let padding = inner_width.saturating_sub(display_width(&row));
-            format!("│{row}{}│", " ".repeat(padding))
-        }));
-        boxed_rows.push(format!("└{}┘", "─".repeat(inner_width)));
-        baseline += 1;
-        boxed_rows.get_mut(baseline)?.push_str(suffix);
-        rows = boxed_rows;
-    }
+    let baseline = block.baseline();
     if rows.len() > MAX_MATH_ROWS || baseline >= rows.len() {
         return None;
     }
@@ -315,6 +295,90 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
         width,
         baseline,
     })
+}
+
+fn render_normalized(source: &str) -> Option<term_maths::RenderedBlock> {
+    let segments = validation::split_normalized_top_level_boxes(source)?;
+    let mut block = term_maths::RenderedBlock::empty();
+    for segment in segments {
+        let segment_block = match segment {
+            validation::NormalizedMathSegment::Unboxed(source) => {
+                catch_unwind(|| term_maths::render(source)).ok()?
+            }
+            validation::NormalizedMathSegment::Boxed(source) => {
+                boxed_block(&render_normalized(source)?)?
+            }
+        };
+        block = block.beside(&segment_block);
+    }
+    Some(block)
+}
+
+fn boxed_block(block: &term_maths::RenderedBlock) -> Option<term_maths::RenderedBlock> {
+    let boxed_height = block.height().checked_add(/*rhs*/ 2)?;
+    if block.is_empty() || block.baseline() >= block.height() || boxed_height > MAX_MATH_ROWS {
+        return None;
+    }
+
+    let content_rows = block
+        .cells()
+        .iter()
+        .map(|source_row| {
+            let Some(last_content) = source_row
+                .iter()
+                .rposition(|cell| !cell.chars().all(char::is_whitespace))
+            else {
+                return Some(Vec::new());
+            };
+            let mut row = source_row[..=last_content].to_vec();
+            let last_cell = row.last_mut()?;
+            let trimmed_len = last_cell.trim_end().len();
+            last_cell.truncate(trimmed_len);
+            Some(row)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let inner_width = content_rows
+        .iter()
+        .map(|row| row.iter().map(String::as_str).map(display_width).sum())
+        .max()
+        .unwrap_or(0);
+    let boxed_width = inner_width.checked_add(/*rhs*/ 2)?;
+    if boxed_width > MAX_MATH_COLUMNS {
+        return None;
+    }
+
+    let mut rows = Vec::with_capacity(boxed_height);
+    let mut top_border = Vec::with_capacity(boxed_width);
+    top_border.push("┌".to_string());
+    top_border.extend(std::iter::repeat_n("─".to_string(), inner_width));
+    top_border.push("┐".to_string());
+    rows.push(top_border);
+    for source_row in content_rows {
+        let row_width = source_row
+            .iter()
+            .map(String::as_str)
+            .map(display_width)
+            .sum::<usize>();
+        if row_width > inner_width {
+            return None;
+        }
+        let mut row = Vec::with_capacity(boxed_width);
+        row.push("│".to_string());
+        row.extend(source_row);
+        row.extend(std::iter::repeat_n(
+            " ".to_string(),
+            inner_width - row_width,
+        ));
+        row.push("│".to_string());
+        rows.push(row);
+    }
+    let mut bottom_border = Vec::with_capacity(boxed_width);
+    bottom_border.push("└".to_string());
+    bottom_border.extend(std::iter::repeat_n("─".to_string(), inner_width));
+    bottom_border.push("┘".to_string());
+    rows.push(bottom_border);
+
+    Some(term_maths::RenderedBlock::new(rows, block.baseline() + 1))
 }
 
 fn inline_row(rendered: &RenderedMath) -> Option<String> {

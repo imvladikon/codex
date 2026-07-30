@@ -2,28 +2,32 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn parses_outer_box_with_nested_arguments_and_trailing_punctuation() {
+fn splits_top_level_boxes_with_nested_arguments_and_trailing_text() {
     assert_eq!(
-        parse_normalized_outer_box(r"\boxed{\frac{a}{b}}."),
-        Some(OuterBox {
-            body: r"\frac{a}{b}",
-            trailing_punctuation: ".",
-        }),
+        split_normalized_top_level_boxes(r"I=\boxed{\frac{a}{b}}."),
+        Some(vec![
+            NormalizedMathSegment::Unboxed("I="),
+            NormalizedMathSegment::Boxed(r"\frac{a}{b}"),
+            NormalizedMathSegment::Unboxed("."),
+        ]),
     );
     assert_eq!(
-        parse_normalized_outer_box("  \\boxed{\\text{a {nested} value}}?!  "),
-        Some(OuterBox {
-            body: r"\text{a {nested} value}",
-            trailing_punctuation: "?!",
-        }),
+        split_normalized_top_level_boxes("\\boxed{\\text{a {nested} value}}?!"),
+        Some(vec![
+            NormalizedMathSegment::Boxed(r"\text{a {nested} value}"),
+            NormalizedMathSegment::Unboxed("?!"),
+        ]),
     );
 }
 
 #[test]
-fn rejects_non_outer_box_and_non_punctuation_suffix() {
-    for source in [r"x+\boxed{y}", r"\boxed{x}+y"] {
-        assert_eq!(parse_normalized_outer_box(source), None, "{source:?}",);
-    }
+fn leaves_boxes_nested_in_dependency_arguments_unsplit() {
+    let source = r"\frac{\boxed{x}}{y}";
+
+    assert_eq!(
+        split_normalized_top_level_boxes(source),
+        Some(vec![NormalizedMathSegment::Unboxed(source)]),
+    );
 }
 
 #[test]
@@ -124,6 +128,10 @@ fn normalizes_common_latex_aliases() {
     assert_eq!(
         normalize_strict_latex(r"x\xrightarrow{d}y"),
         Some(Cow::Owned(r"x\overset{d}{\to}y".to_string())),
+    );
+    assert_eq!(
+        normalize_strict_latex(r"\displaystyle  \frac{a}{b}+\textstyle x"),
+        Some(Cow::Owned(r"\frac{a}{b}+x".to_string())),
     );
 }
 

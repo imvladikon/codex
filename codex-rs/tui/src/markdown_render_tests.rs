@@ -1857,10 +1857,20 @@ fn tex_delimiters_render_general_relativity_response() {
 }
 
 #[test]
-fn boxed_display_math_renders_trailing_punctuation_outside_box() {
+fn boxed_display_math_renders_embedded_and_display_style_cases() {
     let markdown = concat!(
         "\\[\n",
-        "\\boxed{\\nabla^\\mu T_{\\mu\\nu}=0}.\n",
+        "I=F''(1)\n",
+        "=\n",
+        "\\frac{\\pi^3}{8}(1\\cdot0+1)\n",
+        "=\n",
+        "\\boxed{\\frac{\\pi^3}{8}}.\n",
+        "\\]\n\n",
+        "\\[\n",
+        "\\boxed{\\displaystyle\n",
+        "\\int_{0}^{\\infty}\\frac{\\ln^2 x}{1+x^2}\\,dx\n",
+        "=\n",
+        "\\frac{\\pi^3}{8}}\n",
         "\\]\n",
     );
 
@@ -2243,8 +2253,8 @@ fn malformed_math_preserves_exact_source() {
 }
 
 #[test]
-fn nested_or_embedded_boxes_preserve_raw_source() {
-    for markdown in [r"$$x+\boxed{y}$$", r"$$\boxed{\boxed{x}}$$"] {
+fn boxes_inside_dependency_arguments_preserve_raw_source() {
+    for markdown in [r"$$\frac{\boxed{x}}{y}$$", r"$$x^{\boxed{y}}$$"] {
         assert_eq!(
             plain_lines(&render_markdown_text(markdown)).join("\n"),
             markdown,
