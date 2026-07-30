@@ -160,6 +160,38 @@ fn incremental_render_tracks_block_containing_unclosed_native_math() {
 }
 
 #[test]
+fn multiline_named_math_stays_mutable_until_closer() {
+    for partial in [
+        "Formula $xy +\n",
+        "Formula $alpha +\n",
+        "Formula $mc^2 +\n",
+        "Formula $theta_1 +\n",
+    ] {
+        let cwd = test_cwd();
+        let mut source = String::new();
+        let mut render = StreamingRender::new();
+
+        append_rich_and_assert_matches_full(
+            &mut render,
+            &mut source,
+            partial,
+            Some(/*width*/ 80),
+            &cwd,
+        );
+        assert_eq!(render.unclosed_math_start, Some(0), "{partial:?}");
+
+        append_rich_and_assert_matches_full(
+            &mut render,
+            &mut source,
+            "z$.\n",
+            Some(/*width*/ 80),
+            &cwd,
+        );
+        assert_eq!(render.unclosed_math_start, None);
+    }
+}
+
+#[test]
 fn completed_paragraph_does_not_hold_unmatched_literal_dollar() {
     let (_, render) = assert_rich_stream_matches_full_render(
         &["Shell variable $HOME.\n\n", "Following paragraph.\n"],

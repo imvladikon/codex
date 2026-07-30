@@ -2208,6 +2208,14 @@ fn literal_slash_math_stays_inline() {
 }
 
 #[test]
+fn operatorname_slash_is_not_interpreted_as_fraction() {
+    assert_eq!(
+        plain_lines(&render_markdown_text(r"$$\operatorname{a/b}$$")),
+        vec!["a/b"],
+    );
+}
+
+#[test]
 fn malformed_math_preserves_exact_source() {
     for markdown in [
         "$x}}}$",
@@ -2221,6 +2229,34 @@ fn malformed_math_preserves_exact_source() {
             markdown,
         );
     }
+}
+
+#[test]
+fn nested_or_embedded_boxes_preserve_raw_source() {
+    for markdown in [r"$$x+\boxed{y}$$", r"$$\boxed{\boxed{x}}$$"] {
+        assert_eq!(
+            plain_lines(&render_markdown_text(markdown)).join("\n"),
+            markdown,
+        );
+    }
+}
+
+#[test]
+fn residual_backslashes_preserve_raw_source() {
+    let markdown = r"$$\text{a\_b}$$";
+
+    assert_eq!(
+        plain_lines(&render_markdown_text(markdown)).join("\n"),
+        markdown,
+    );
+}
+
+#[test]
+fn bare_asterisk_renders_as_multiplication() {
+    assert_eq!(
+        plain_lines(&render_markdown_text("$a*b$")),
+        vec!["a · b"],
+    );
 }
 
 #[test]

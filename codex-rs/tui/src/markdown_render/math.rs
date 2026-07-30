@@ -262,12 +262,10 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
     let (source, boxed) = strip_outer_box(&source)
         .map(|source| (source, true))
         .unwrap_or((&source, false));
-    let source = if source.contains(r"\boxed{") {
-        Cow::Owned(source.replace(r"\boxed{", "{"))
-    } else {
-        Cow::Borrowed(source)
-    };
-    let block = catch_unwind(|| term_maths::render(&source)).ok()?;
+    if source.contains(r"\boxed{") {
+        return None;
+    }
+    let block = catch_unwind(|| term_maths::render(source)).ok()?;
     if block.height() == 0
         || block.height() > MAX_MATH_ROWS
         || block.width() == 0
@@ -287,9 +285,10 @@ pub(super) fn render(source: &str) -> Option<RenderedMath> {
                 .to_owned()
         })
         .collect::<Vec<_>>();
-    if rows.iter().any(|row| {
-        contains_unrendered_command(row) || row.chars().any(|character| char_width(character) == 0)
-    }) {
+    if rows
+        .iter()
+        .any(|row| row.contains('\\') || row.chars().any(|character| char_width(character) == 0))
+    {
         return None;
     }
     let mut baseline = block.baseline();
@@ -329,13 +328,6 @@ fn strip_outer_box(source: &str) -> Option<&str> {
         }
     }
     (depth == 0).then_some(body)
-}
-
-fn contains_unrendered_command(source: &str) -> bool {
-    source
-        .as_bytes()
-        .windows(2)
-        .any(|pair| pair[0] == b'\\' && pair[1].is_ascii_alphabetic())
 }
 
 fn inline_row(rendered: &RenderedMath) -> Option<String> {

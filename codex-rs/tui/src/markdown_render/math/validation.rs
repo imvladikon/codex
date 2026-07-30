@@ -39,6 +39,9 @@ fn validate_structure(source: &str) -> Option<()> {
                 let environment = &source[argument.start + 1..argument.end - 1];
                 if name == "begin" {
                     environments.push(environment);
+                    if environments.len() > super::MAX_MATH_NESTING {
+                        return None;
+                    }
                 } else if environments.pop() != Some(environment) {
                     return None;
                 }
@@ -51,7 +54,10 @@ fn validate_structure(source: &str) -> Option<()> {
                     return None;
                 }
                 if name == "left" {
-                    delimiter_depth += 1;
+                    delimiter_depth = delimiter_depth.checked_add(1)?;
+                    if delimiter_depth > super::MAX_MATH_NESTING {
+                        return None;
+                    }
                 } else {
                     delimiter_depth = delimiter_depth.checked_sub(1)?;
                 }
@@ -112,7 +118,7 @@ fn normalize_literal_slashes(source: Cow<'_, str>) -> Option<Cow<'_, str>> {
         if source.as_bytes()[offset] == b'\\'
             && let Some((command, command_end)) = alphabetic_command_at(&source, offset)
         {
-            if matches!(command, "text" | "operatorname")
+            if command == "text"
                 && let Some(argument) = next_argument(&source, command_end)
             {
                 offset = argument.end;
@@ -147,6 +153,11 @@ fn normalize_latex_aliases(source: Cow<'_, str>) -> Option<Cow<'_, str>> {
     while offset < source.len() {
         if source.as_bytes()[offset] != b'\\' {
             offset += source[offset..].chars().next()?.len_utf8();
+            continue;
+        }
+        if source[offset..].starts_with(r"\|") {
+            replacements.push((offset..offset + 2, "‖".to_string()));
+            offset += 2;
             continue;
         }
         let Some((command, command_end)) = alphabetic_command_at(&source, offset) else {
@@ -185,8 +196,9 @@ fn normalize_latex_aliases(source: Cow<'_, str>) -> Option<Cow<'_, str>> {
             "dagger" => "†",
             "langle" => "⟨",
             "rangle" => "⟩",
-            "lvert" | "rvert" | "mid" => "|",
-            "lVert" | "rVert" => "‖",
+            "vert" | "lvert" | "rvert" => "|",
+            "mid" => " | ",
+            "Vert" | "lVert" | "rVert" => "‖",
             "big" | "Big" | "bigg" | "Bigg" | "bigl" | "bigr" | "Bigl" | "Bigr" | "biggl"
             | "biggr" | "Biggl" | "Biggr" => "",
             "Longleftrightarrow" => r"\Leftrightarrow",

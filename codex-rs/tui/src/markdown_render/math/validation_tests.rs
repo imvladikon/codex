@@ -72,6 +72,10 @@ fn normalizes_literal_slashes_in_explicit_latex() {
         normalize_strict_latex(r"\text{rate/day}=dq/dt"),
         Some(Cow::Owned(r"\text{rate/day}=dq\text{/}dt".to_string(),)),
     );
+    assert_eq!(
+        normalize_strict_latex(r"\operatorname{a/b}"),
+        Some(Cow::Owned(r"\operatorname{a\text{/}b}".to_string(),)),
+    );
 }
 
 #[test]
@@ -81,7 +85,7 @@ fn normalizes_common_latex_aliases() {
             r"\tfrac12+\widehat f+\Box+a^\dagger+\langle x\mid y\rangle+\lVert z\rVert"
         ),
         Some(Cow::Owned(
-            r"\frac{1}{2}+\hat {f}+□+a^{†}+⟨ x| y⟩+‖ z‖".to_string(),
+            r"\frac{1}{2}+\hat {f}+□+a^{†}+⟨ x |  y⟩+‖ z‖".to_string(),
         )),
     );
     assert_eq!(
@@ -95,6 +99,22 @@ fn normalizes_common_latex_aliases() {
     assert_eq!(
         normalize_strict_latex(r"x\xrightarrow{d}y"),
         Some(Cow::Owned(r"x\overset{d}{\to}y".to_string())),
+    );
+}
+
+#[test]
+fn normalizes_double_vertical_bar_commands() {
+    assert_eq!(
+        normalize_strict_latex(r"\|x\|"),
+        Some(Cow::Owned("‖x‖".to_string())),
+    );
+    assert_eq!(
+        normalize_strict_latex(r"\left\|x\right\|"),
+        Some(Cow::Owned(r"\left‖x\right‖".to_string())),
+    );
+    assert_eq!(
+        normalize_strict_latex(r"\Vert x\vert"),
+        Some(Cow::Owned("‖ x|".to_string())),
     );
 }
 

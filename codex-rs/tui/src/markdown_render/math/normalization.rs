@@ -319,10 +319,24 @@ fn looks_like_unmatched_literal_dollar(input: &str, offset: usize) -> bool {
     if suffix.starts_with(|character: char| character.is_ascii_digit()) {
         return true;
     }
-    let Some((variable, _)) = super::split_shell_variable(suffix) else {
+    let Some((variable, remainder)) = super::split_shell_variable(suffix) else {
         return false;
     };
-    suffix.starts_with('{') || variable.chars().count() > 1
+    if suffix.starts_with('{') {
+        return true;
+    }
+
+    let obvious_environment_variable = variable.chars().count() > 1
+        && variable.chars().all(|character| {
+            character == '_' || character.is_ascii_uppercase() || character.is_ascii_digit()
+        });
+    if !obvious_environment_variable {
+        return false;
+    }
+
+    let math_tail = remainder.trim_start();
+    !math_tail.starts_with(['+', '-', '=', '^', '_', '*', '/', '<', '>', '(', '['])
+        && !math_tail.starts_with('\\')
 }
 
 fn collect_paired_delimiters(
