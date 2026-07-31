@@ -20,6 +20,9 @@ fn rejects_each_oversized_resource_class() {
         .collect::<Vec<_>>()
         .join("+");
     assert!(render(&excessive_columns).is_none());
+
+    let excessive_composition = r"\boxed{x}".repeat(MAX_MATH_COLUMNS);
+    assert!(render(&excessive_composition).is_none());
 }
 
 #[test]

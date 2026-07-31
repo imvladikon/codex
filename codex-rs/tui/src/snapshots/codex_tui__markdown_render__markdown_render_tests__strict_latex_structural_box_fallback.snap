@@ -1,0 +1,24 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: rendered
+---
+[
+    [
+        "$$\\begin{matrix}a & \\boxed{b} & c\\end{matrix}$$",
+    ],
+    [
+        "$$\\begin{cases}\\boxed{x} & x>0 \\\\ 0 & x\\le0\\end{cases}$$",
+    ],
+    [
+        "$$\\left(\\boxed{x}\\right)$$",
+    ],
+    [
+        "$$\\boxed{x}^{2}$$",
+    ],
+    [
+        "$$\\boxed{x}_{i}$$",
+    ],
+    [
+        "$$\\boxed{x}_{i}^{2}$$",
+    ],
+]

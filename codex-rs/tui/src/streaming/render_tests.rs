@@ -160,12 +160,15 @@ fn incremental_render_tracks_block_containing_unclosed_native_math() {
 }
 
 #[test]
-fn multiline_named_math_stays_mutable_until_closer() {
+fn multiline_native_math_stays_mutable_until_closer() {
     for partial in [
         "Formula $xy +\n",
         "Formula $alpha +\n",
         "Formula $mc^2 +\n",
         "Formula $theta_1 +\n",
+        "Formula $1 +\n",
+        "Formula $3.14 r^2 +\n",
+        "Formula ${x} +\n",
     ] {
         let cwd = test_cwd();
         let mut source = String::new();
@@ -188,6 +191,36 @@ fn multiline_named_math_stays_mutable_until_closer() {
             &cwd,
         );
         assert_eq!(render.unclosed_math_start, None);
+    }
+}
+
+#[test]
+fn rich_stream_matches_full_render_at_every_utf8_chunk_boundary() {
+    for source in [
+        "Пример: $3.14 r^2 + z$.\n",
+        "Матрица: $$\\begin{matrix}α & β \\\\ γ & δ\\end{matrix}$$\n",
+        concat!(
+            "Для $\\lambda_1=1$:\n\n",
+            "\\[\n",
+            "(A-I)v=0\\quad\\Longrightarrow\\quad",
+            "\\begin{pmatrix}1&1\\\\1&1\\end{pmatrix}",
+            "\\begin{pmatrix}x\\\\y\\end{pmatrix}=0\n",
+            "\\]\n",
+        ),
+        "Рамка: $$E=\\boxed{mc^2}$$\n",
+        "Норма: $$\\lVert x\\rVert=1$$\n",
+    ] {
+        for split in source
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(source.len()))
+        {
+            let (prefix, suffix) = source.split_at(split);
+            let (_, render) =
+                assert_rich_stream_matches_full_render(&[prefix, suffix], Some(/*width*/ 80));
+
+            assert_eq!(render.unclosed_math_start, None, "{source:?} at {split}");
+        }
     }
 }
 

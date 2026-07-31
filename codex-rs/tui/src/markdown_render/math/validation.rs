@@ -20,6 +20,10 @@ pub(super) enum NormalizedMathSegment<'a> {
 pub(super) fn split_normalized_top_level_boxes(
     source: &str,
 ) -> Option<Vec<NormalizedMathSegment<'_>>> {
+    if !source.contains(r"\boxed") {
+        return Some(vec![NormalizedMathSegment::Unboxed(source)]);
+    }
+
     let mut segments = Vec::new();
     let mut copied_until = 0;
     let mut brace_depth = 0usize;
@@ -32,9 +36,17 @@ pub(super) fn split_normalized_top_level_boxes(
                 offset = next_argument(source, command_end)?.end;
                 continue;
             }
+            if matches!(command, "begin" | "end" | "left" | "right") {
+                return None;
+            }
             if command == "boxed" && brace_depth == 0 {
                 let argument = next_argument(source, command_end)?;
                 if !argument.braced {
+                    return None;
+                }
+                let previous = source[..offset].trim_end();
+                let next_offset = skip_whitespace(source, argument.end);
+                if previous.ends_with(['^', '_']) || source[next_offset..].starts_with(['^', '_']) {
                     return None;
                 }
                 if copied_until < offset {
@@ -220,7 +232,7 @@ fn normalize_latex_aliases(source: Cow<'_, str>) -> Option<Cow<'_, str>> {
             offset += source[offset..].chars().next()?.len_utf8();
             continue;
         }
-        if source[offset..].starts_with(r"\|") {
+        if source[offset..].starts_with(r"\|") && !is_escaped(source.as_bytes(), offset) {
             replacements.push((offset..offset + 2, "‖".to_string()));
             offset += 2;
             continue;
@@ -276,6 +288,8 @@ fn normalize_latex_aliases(source: Cow<'_, str>) -> Option<Cow<'_, str>> {
             "big" | "Big" | "bigg" | "Bigg" | "bigl" | "bigr" | "Bigl" | "Bigr" | "biggl"
             | "biggr" | "Biggl" | "Biggr" => "",
             "Longleftrightarrow" => r"\Leftrightarrow",
+            "Longrightarrow" => r"\Rightarrow",
+            "Longleftarrow" => r"\Leftarrow",
             "longrightarrow" => r"\to",
             "longleftarrow" => r"\leftarrow",
             _ => {
@@ -523,7 +537,7 @@ fn contains_alphabetic_command(source: &str) -> bool {
 }
 
 fn alphabetic_command_at(source: &str, offset: usize) -> Option<(&str, usize)> {
-    if source.as_bytes().get(offset) != Some(&b'\\') {
+    if source.as_bytes().get(offset) != Some(&b'\\') || is_escaped(source.as_bytes(), offset) {
         return None;
     }
     let start = offset + 1;

@@ -13,6 +13,7 @@ use std::panic::catch_unwind;
 mod normalization;
 mod validation;
 
+pub(super) use normalization::LiteralDollarEncoding;
 pub(super) use normalization::normalize_tex_delimiters;
 pub(super) use normalization::restore_literal_dollars;
 
@@ -20,7 +21,7 @@ const MAX_MATH_SOURCE_BYTES: usize = 8 * 1024;
 const MAX_MATH_NESTING: usize = 64;
 const MAX_MATH_ROWS: usize = 24;
 const MAX_MATH_COLUMNS: usize = 256;
-const LITERAL_DOLLAR_SENTINEL: u8 = 0x1e;
+const LITERAL_DOLLAR_SENTINELS: [u8; 4] = [0x1e, 0x1f, 0x1d, 0x1c];
 
 pub(super) struct RenderedMath {
     pub(super) rows: Vec<String>,
@@ -235,10 +236,7 @@ fn split_shell_variable(source: &str) -> Option<(&str, &str)> {
 pub(super) fn render(source: &str) -> Option<RenderedMath> {
     if source.len() > MAX_MATH_SOURCE_BYTES
         || has_excessive_nesting(source)
-        || source
-            .as_bytes()
-            .iter()
-            .any(|byte| matches!(*byte, b'$' | LITERAL_DOLLAR_SENTINEL))
+        || source.as_bytes().contains(&b'$')
         || source
             .chars()
             .any(|character| !matches!(character, '\r' | '\n') && char_width(character) == 0)
@@ -309,7 +307,20 @@ fn render_normalized(source: &str) -> Option<term_maths::RenderedBlock> {
                 boxed_block(&render_normalized(source)?)?
             }
         };
+        if segment_block.height() > MAX_MATH_ROWS || segment_block.width() > MAX_MATH_COLUMNS {
+            return None;
+        }
+        if block
+            .width()
+            .checked_add(segment_block.width())
+            .is_none_or(|width| width > MAX_MATH_COLUMNS)
+        {
+            return None;
+        }
         block = block.beside(&segment_block);
+        if block.height() > MAX_MATH_ROWS || block.width() > MAX_MATH_COLUMNS {
+            return None;
+        }
     }
     Some(block)
 }

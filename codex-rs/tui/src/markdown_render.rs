@@ -354,7 +354,14 @@ pub(crate) fn render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
     let parser = DecodedTextMerge::new(
         Parser::new_ext(&normalized.source, markdown_options()).into_offset_iter(),
     );
-    let mut w = Writer::new(input, parser, width, cwd, is_hidden_link_destination);
+    let mut w = Writer::new(
+        input,
+        parser,
+        width,
+        cwd,
+        is_hidden_link_destination,
+        normalized.literal_dollar_encoding,
+    );
     w.run();
     w.text
 }
@@ -427,6 +434,7 @@ where
     current_line_style: Style,
     current_line_skip_wrap: bool,
     table_state: Option<TableState>,
+    literal_dollar_encoding: math::LiteralDollarEncoding,
 }
 
 impl<'a, 'policy, I> Writer<'a, 'policy, I>
@@ -439,6 +447,7 @@ where
         wrap_width: Option<usize>,
         cwd: Option<&Path>,
         is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
+        literal_dollar_encoding: math::LiteralDollarEncoding,
     ) -> Self {
         Self {
             input,
@@ -468,6 +477,7 @@ where
             current_line_style: Style::default(),
             current_line_skip_wrap: false,
             table_state: None,
+            literal_dollar_encoding,
         }
     }
 
@@ -483,7 +493,10 @@ where
         match event {
             Event::Start(tag) => self.start_tag(tag, range),
             Event::End(tag) => self.end_tag(tag),
-            Event::Text(text) => self.text(math::restore_literal_dollars(text)),
+            Event::Text(text) => self.text(math::restore_literal_dollars(
+                text,
+                self.literal_dollar_encoding,
+            )),
             Event::Code(code) => self.code(code),
             Event::InlineMath(source) => self.inline_math(source, range),
             Event::DisplayMath(source) => self.display_math(source, range),
@@ -2490,6 +2503,7 @@ mod tests {
             /*wrap_width*/ Some(80),
             /*cwd*/ None,
             &never_hide_link_destination,
+            math::LiteralDollarEncoding::Unchanged,
         );
         let wrapped = writer.wrap_cell(&cell, /*width*/ 40);
         let rendered = wrapped

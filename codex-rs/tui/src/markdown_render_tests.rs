@@ -1857,6 +1857,33 @@ fn tex_delimiters_render_general_relativity_response() {
 }
 
 #[test]
+fn tex_delimiters_render_reported_eigenvector_derivation() {
+    let markdown = concat!(
+        "Для $\\lambda_1 = 1$:\n\n",
+        "\\[\n",
+        "(A-I)v=0\n",
+        "\\quad\\Longrightarrow\\quad\n",
+        "\\begin{pmatrix}\n",
+        "1&1\\\\\n",
+        "1&1\n",
+        "\\end{pmatrix}\n",
+        "\\begin{pmatrix}x\\\\y\\end{pmatrix}=0,\n",
+        "\\]\n\n",
+        "откуда $x=-y$.\n\n",
+        "Для $\\lambda_2 = 3$:\n\n",
+        "\\[\n",
+        "(A-3I)v=0\n",
+        "\\quad\\Longrightarrow\\quad x=y,\n",
+        "\\]\n",
+    );
+
+    assert_debug_snapshot!(
+        "tex_delimiters_render_reported_eigenvector_derivation",
+        plain_lines(&render_markdown_text(markdown)),
+    );
+}
+
+#[test]
 fn boxed_display_math_renders_embedded_and_display_style_cases() {
     let markdown = concat!(
         "\\[\n",
@@ -2260,6 +2287,46 @@ fn boxes_inside_dependency_arguments_preserve_raw_source() {
             markdown,
         );
     }
+}
+
+#[test]
+fn boxes_depending_on_surrounding_tex_structure_preserve_raw_source() {
+    let rendered = [
+        r"$$\begin{matrix}a & \boxed{b} & c\end{matrix}$$",
+        r"$$\begin{cases}\boxed{x} & x>0 \\ 0 & x\le0\end{cases}$$",
+        r"$$\left(\boxed{x}\right)$$",
+        r"$$\boxed{x}^{2}$$",
+        r"$$\boxed{x}_{i}$$",
+        r"$$\boxed{x}_{i}^{2}$$",
+    ]
+    .map(|markdown| plain_lines(&render_markdown_text(markdown)));
+
+    assert_debug_snapshot!("strict_latex_structural_box_fallback", rendered);
+}
+
+#[test]
+fn matrix_row_separators_are_not_reinterpreted_as_commands() {
+    let rendered = [
+        r"$$\begin{matrix}a\\|b\end{matrix}$$",
+        r"$$\begin{matrix}a\\\|b\end{matrix}$$",
+        r"$$\begin{matrix}a\\pi\end{matrix}$$",
+        r"$$\begin{matrix}a\\\pi\end{matrix}$$",
+    ]
+    .map(|markdown| plain_lines(&render_markdown_text(markdown)));
+
+    assert_debug_snapshot!("strict_latex_escaped_command_boundaries", rendered);
+}
+
+#[test]
+fn literal_record_separator_is_not_restored_as_a_dollar() {
+    let rendered = [
+        "before\u{1e}after; price $5",
+        "before &#30; after; price $5",
+        "before &#x1e; after; price $5",
+    ]
+    .map(|markdown| plain_lines(&render_markdown_text(markdown)));
+
+    assert_debug_snapshot!("literal_record_separator", rendered);
 }
 
 #[test]

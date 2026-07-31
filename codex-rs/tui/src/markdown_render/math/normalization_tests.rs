@@ -43,3 +43,29 @@ fn display_math_does_not_cross_blockquotes() {
 
     assert_eq!(normalize_tex_delimiters(input).source, input);
 }
+
+#[test]
+fn reports_unclosed_numeric_and_braced_math_expressions() {
+    for input in [
+        "Formula $1 +\n",
+        "Formula $3.14 r^2 +\n",
+        "Formula ${x} +\n",
+    ] {
+        assert_eq!(
+            normalize_tex_delimiters(input).unclosed_math_start,
+            Some("Formula ".len()),
+            "{input:?}",
+        );
+    }
+}
+
+#[test]
+fn leaves_unmatched_currency_and_shell_variables_unheld() {
+    for input in ["Price $5\n", "Use $HOME\n", "Use ${HOME}\n"] {
+        assert_eq!(
+            normalize_tex_delimiters(input).unclosed_math_start,
+            None,
+            "{input:?}",
+        );
+    }
+}

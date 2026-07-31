@@ -31,6 +31,28 @@ fn leaves_boxes_nested_in_dependency_arguments_unsplit() {
 }
 
 #[test]
+fn rejects_boxes_that_depend_on_surrounding_tex_structure() {
+    for source in [
+        r"\begin{matrix}a & \boxed{b} & c\end{matrix}",
+        r"\begin{cases}\boxed{x} & x>0 \\ 0 & x\le0\end{cases}",
+        r"\left(\boxed{x}\right)",
+        r"\boxed{x}^{2}",
+        r"\boxed{x}_{i}",
+        r"\boxed{x}_{i}^{2}",
+    ] {
+        assert_eq!(split_normalized_top_level_boxes(source), None, "{source:?}");
+    }
+}
+
+#[test]
+fn splits_nested_outer_boxes_without_losing_the_outer_frame() {
+    assert_eq!(
+        split_normalized_top_level_boxes(r"\boxed{\boxed{x}}"),
+        Some(vec![NormalizedMathSegment::Boxed(r"\boxed{x}")]),
+    );
+}
+
+#[test]
 fn normalizes_unbraced_fraction_tokens() {
     assert_eq!(
         normalize_strict_latex(r"\frac12"),
@@ -118,8 +140,12 @@ fn normalizes_common_latex_aliases() {
         )),
     );
     assert_eq!(
-        normalize_strict_latex(r"\bigl(x\bigr)\Longleftrightarrow y\longrightarrow z"),
-        Some(Cow::Owned(r"(x)\Leftrightarrow y\to z".to_string())),
+        normalize_strict_latex(
+            r"\bigl(x\bigr)\Longleftrightarrow y\Longrightarrow z\Longleftarrow w"
+        ),
+        Some(Cow::Owned(
+            r"(x)\Leftrightarrow y\Rightarrow z\Leftarrow w".to_string(),
+        )),
     );
     assert_eq!(
         normalize_strict_latex(r"\bigg|_0^\infty"),
@@ -148,6 +174,28 @@ fn normalizes_double_vertical_bar_commands() {
     assert_eq!(
         normalize_strict_latex(r"\Vert x\vert"),
         Some(Cow::Owned("‖ x|".to_string())),
+    );
+}
+
+#[test]
+fn preserves_row_separators_before_alias_like_text() {
+    assert_eq!(
+        normalize_strict_latex(r"\begin{matrix}a\\|b\end{matrix}"),
+        Some(Cow::Borrowed(r"\begin{matrix}a\\|b\end{matrix}")),
+    );
+    assert_eq!(
+        normalize_strict_latex(r"\begin{matrix}a\\\|b\end{matrix}"),
+        Some(Cow::Owned(
+            "\\begin{matrix}a\\\\‖b\\end{matrix}".to_string(),
+        )),
+    );
+    assert_eq!(
+        normalize_strict_latex(r"\begin{matrix}a\\pi\end{matrix}"),
+        None,
+    );
+    assert_eq!(
+        normalize_strict_latex(r"\begin{matrix}a\\\pi\end{matrix}"),
+        Some(Cow::Borrowed(r"\begin{matrix}a\\\pi\end{matrix}")),
     );
 }
 

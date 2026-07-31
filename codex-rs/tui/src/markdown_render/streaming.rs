@@ -48,7 +48,14 @@ pub(crate) fn render_streaming_markdown_lines_with_width_and_cwd(
         last_start: 0,
         first_is_html: false,
     };
-    let mut writer = Writer::new(input, parser, width, cwd, &never_hide_link_destination);
+    let mut writer = Writer::new(
+        input,
+        parser,
+        width,
+        cwd,
+        &never_hide_link_destination,
+        normalized.literal_dollar_encoding,
+    );
     writer.run();
     let unclosed_math_start = normalized.unclosed_math_start.map(|delimiter_start| {
         if writer.iter.block_count == 0 {

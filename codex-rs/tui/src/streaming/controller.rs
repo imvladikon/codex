@@ -1282,6 +1282,60 @@ mod tests {
     }
 
     #[test]
+    fn controller_holds_numeric_and_braced_math_until_the_closing_delimiter() {
+        for partial in [
+            "Formula $1 +\n",
+            "Formula $3.14 r^2 +\n",
+            "Formula ${x} +\n",
+        ] {
+            let deltas = [partial, "z$.\n"];
+            let streamed = collect_streamed_lines(&deltas, Some(/*width*/ 80));
+            let mut rendered = Vec::new();
+            crate::markdown::append_markdown_agent(
+                &deltas.concat(),
+                Some(/*width*/ 80),
+                &mut rendered,
+            );
+
+            assert_eq!(streamed, lines_to_plain_strings(&rendered), "{partial:?}");
+        }
+    }
+
+    #[test]
+    fn controller_matches_full_render_at_every_multiline_math_chunk_boundary() {
+        for source in ["Пример: $3.14 r^2 +\nz$.\n", "Пример: ${x} +\ny$.\n"] {
+            let mut boundaries = source
+                .char_indices()
+                .map(|(offset, _)| offset)
+                .collect::<Vec<_>>();
+            boundaries.push(source.len());
+
+            let mut rendered = Vec::new();
+            crate::markdown::append_markdown_agent(source, Some(/*width*/ 80), &mut rendered);
+            let rendered = lines_to_plain_strings(&rendered);
+
+            for split in boundaries.iter().copied() {
+                let (prefix, suffix) = source.split_at(split);
+                assert_eq!(
+                    collect_streamed_lines(&[prefix, suffix], Some(/*width*/ 80)),
+                    rendered,
+                    "{source:?} at {split}",
+                );
+            }
+
+            let chunks = boundaries
+                .windows(2)
+                .map(|window| &source[window[0]..window[1]])
+                .collect::<Vec<_>>();
+            assert_eq!(
+                collect_streamed_lines(&chunks, Some(/*width*/ 80)),
+                rendered,
+                "{source:?} one character at a time",
+            );
+        }
+    }
+
+    #[test]
     fn controller_emits_completed_prefix_before_unclosed_native_math() {
         let mut ctrl = stream_controller(Some(80));
         let prefix = "Completed paragraph.\n\nFormula ";

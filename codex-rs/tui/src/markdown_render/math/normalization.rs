@@ -1,5 +1,5 @@
 use super::super::markdown_options;
-use super::LITERAL_DOLLAR_SENTINEL;
+use super::LITERAL_DOLLAR_SENTINELS;
 use super::looks_like_literal_dollars;
 use pulldown_cmark::CowStr;
 use pulldown_cmark::Event;
@@ -13,6 +13,13 @@ use std::ops::Range;
 pub(in crate::markdown_render) struct NormalizedMath<'a> {
     pub(in crate::markdown_render) source: Cow<'a, str>,
     pub(in crate::markdown_render) unclosed_math_start: Option<usize>,
+    pub(in crate::markdown_render) literal_dollar_encoding: LiteralDollarEncoding,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::markdown_render) enum LiteralDollarEncoding {
+    Unchanged,
+    Sentinel(u8),
 }
 
 struct DelimiterPair {
@@ -43,9 +50,15 @@ struct MathRegionFrame {
     range: Range<usize>,
 }
 
-pub(in crate::markdown_render) fn restore_literal_dollars(text: CowStr<'_>) -> CowStr<'_> {
-    if text.as_bytes().contains(&LITERAL_DOLLAR_SENTINEL) {
-        text.replace(LITERAL_DOLLAR_SENTINEL as char, "$").into()
+pub(in crate::markdown_render) fn restore_literal_dollars(
+    text: CowStr<'_>,
+    encoding: LiteralDollarEncoding,
+) -> CowStr<'_> {
+    let LiteralDollarEncoding::Sentinel(sentinel) = encoding else {
+        return text;
+    };
+    if text.as_bytes().contains(&sentinel) {
+        text.replace(char::from(sentinel), "$").into()
     } else {
         text
     }
@@ -56,6 +69,7 @@ pub(in crate::markdown_render) fn normalize_tex_delimiters(input: &str) -> Norma
         return NormalizedMath {
             source: Cow::Borrowed(input),
             unclosed_math_start: None,
+            literal_dollar_encoding: LiteralDollarEncoding::Unchanged,
         };
     }
 
@@ -119,18 +133,39 @@ pub(in crate::markdown_render) fn normalize_tex_delimiters(input: &str) -> Norma
         return NormalizedMath {
             source: Cow::Borrowed(input),
             unclosed_math_start,
+            literal_dollar_encoding: LiteralDollarEncoding::Unchanged,
         };
     }
 
+    let needs_literal_dollar_encoding =
+        !native_math.literal_dollars.is_empty() || !native_math.literal_math.is_empty();
+    let literal_dollar_encoding = if needs_literal_dollar_encoding {
+        let Some(sentinel) = LITERAL_DOLLAR_SENTINELS
+            .into_iter()
+            .find(|sentinel| literal_dollar_sentinel_is_available(input, *sentinel))
+        else {
+            return NormalizedMath {
+                source: Cow::Borrowed(input),
+                unclosed_math_start,
+                literal_dollar_encoding: LiteralDollarEncoding::Unchanged,
+            };
+        };
+        LiteralDollarEncoding::Sentinel(sentinel)
+    } else {
+        LiteralDollarEncoding::Unchanged
+    };
+
     let mut normalized = input.as_bytes().to_vec();
-    for offset in native_math.literal_dollars {
-        normalized[offset] = LITERAL_DOLLAR_SENTINEL;
-    }
-    for range in native_math.literal_math {
-        normalized[range.start] = LITERAL_DOLLAR_SENTINEL;
-        let close_offset = range.end.saturating_sub(1);
-        if is_text_source(close_offset..range.end, &markdown.text) {
-            normalized[close_offset] = LITERAL_DOLLAR_SENTINEL;
+    if let LiteralDollarEncoding::Sentinel(sentinel) = literal_dollar_encoding {
+        for offset in native_math.literal_dollars {
+            normalized[offset] = sentinel;
+        }
+        for range in native_math.literal_math {
+            normalized[range.start] = sentinel;
+            let close_offset = range.end.saturating_sub(1);
+            if is_text_source(close_offset..range.end, &markdown.text) {
+                normalized[close_offset] = sentinel;
+            }
         }
     }
     for (pair, open, close) in pairs {
@@ -164,7 +199,21 @@ pub(in crate::markdown_render) fn normalize_tex_delimiters(input: &str) -> Norma
     NormalizedMath {
         source,
         unclosed_math_start,
+        literal_dollar_encoding,
     }
+}
+
+fn literal_dollar_sentinel_is_available(input: &str, sentinel: u8) -> bool {
+    !input.as_bytes().contains(&sentinel)
+        && !input.split("&#").skip(1).any(|entity| {
+            let (radix, digits) = entity
+                .strip_prefix(['x', 'X'])
+                .map_or((10, entity), |digits| (16, digits));
+            digits
+                .split_once(';')
+                .and_then(|(digits, _)| u32::from_str_radix(digits, radix).ok())
+                == Some(u32::from(sentinel))
+        })
 }
 
 fn markdown_ranges(input: &str) -> MarkdownRanges {
@@ -317,14 +366,19 @@ fn native_math_ranges(input: &str, containers: &[Range<usize>]) -> NativeMathRan
 fn looks_like_unmatched_literal_dollar(input: &str, offset: usize) -> bool {
     let suffix = &input[offset + 1..];
     if suffix.starts_with(|character: char| character.is_ascii_digit()) {
-        return true;
+        let numeric_end = suffix
+            .char_indices()
+            .take_while(|(_, character)| {
+                character.is_ascii_digit() || matches!(character, '.' | ',')
+            })
+            .map(|(offset, character)| offset + character.len_utf8())
+            .last()
+            .unwrap_or_default();
+        return !has_math_expression_tail(&suffix[numeric_end..]);
     }
     let Some((variable, remainder)) = super::split_shell_variable(suffix) else {
         return false;
     };
-    if suffix.starts_with('{') {
-        return true;
-    }
 
     let obvious_environment_variable = variable.chars().count() > 1
         && variable.chars().all(|character| {
@@ -334,9 +388,18 @@ fn looks_like_unmatched_literal_dollar(input: &str, offset: usize) -> bool {
         return false;
     }
 
-    let math_tail = remainder.trim_start();
-    !math_tail.starts_with(['+', '-', '=', '^', '_', '*', '/', '<', '>', '(', '['])
-        && !math_tail.starts_with('\\')
+    !has_math_expression_tail(remainder)
+}
+
+fn has_math_expression_tail(remainder: &str) -> bool {
+    let tail = remainder
+        .split(['\r', '\n', '$'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    tail.starts_with(['+', '-', '=', '^', '_', '*', '/', '<', '>', '(', '[', '\\'])
+        || tail.ends_with(['+', '-', '=', '^', '_', '*', '/', '<', '>'])
+        || tail.contains(['^', '_', '\\'])
 }
 
 fn collect_paired_delimiters(
