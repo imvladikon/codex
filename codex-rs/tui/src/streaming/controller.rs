@@ -393,6 +393,9 @@ impl StreamCore {
         if self.render_mode == HistoryRenderMode::Raw {
             return 0;
         }
+        if let Some(start) = self.render.unclosed_math_start {
+            return self.tail_budget_from_source_start(start);
+        }
         let scan_start = Instant::now();
         let holdback_state = self.holdback_scanner.state();
         let tail_budget = match holdback_state {
@@ -1256,6 +1259,21 @@ mod tests {
             streamed, expected,
             "expected exact rendered lines for loose/tight section"
         );
+    }
+
+    #[test]
+    fn controller_holds_math_until_the_closing_delimiter() {
+        let deltas = [
+            "Stable paragraph.\n\n",
+            "Formula \\[\n",
+            "\\boxed{\\frac{8\\pi G}{c^4}}\n",
+            "\\]\n",
+        ];
+        let streamed = collect_streamed_lines(&deltas, Some(/*width*/ 80));
+        let mut rendered = Vec::new();
+        crate::markdown::append_markdown_agent(&deltas.concat(), Some(/*width*/ 80), &mut rendered);
+
+        assert_eq!(streamed, lines_to_plain_strings(&rendered));
     }
 
     #[test]

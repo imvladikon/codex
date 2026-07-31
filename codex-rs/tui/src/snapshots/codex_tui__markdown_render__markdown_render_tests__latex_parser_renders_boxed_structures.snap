@@ -1,0 +1,17 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: "plain_lines(&render_markdown_text(markdown)).join(\"\\n\")"
+---
+┌────────────┐
+│      8πG   │
+│R   = ───T  │
+│ μν   c⁴  μν│
+└────────────┘
+
+┌────────┐
+│⎛1     ⎞│
+│⎜─   0 ⎟│
+│⎜2     ⎟│
+│⎜     ─⎟│
+│⎝0  √ x⎠│
+└────────┘

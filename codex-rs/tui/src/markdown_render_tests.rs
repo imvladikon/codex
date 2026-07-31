@@ -1813,3 +1813,52 @@ fn table_key_value_fallback_preserves_rich_values_and_themed_labels() {
             .any(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
     }));
 }
+
+#[test]
+fn latex_parser_renders_reported_eigenvector_derivation() {
+    let markdown = concat!(
+        "Для $\\lambda_1 = 1$:\n\n",
+        "\\[\n",
+        "(A-I)v=0\\quad\\Longrightarrow\\quad",
+        "\\begin{pmatrix}1&1\\\\1&1\\end{pmatrix}",
+        "\\begin{pmatrix}x\\\\y\\end{pmatrix}=0,\n",
+        "\\]\n",
+    );
+
+    assert_debug_snapshot!(
+        "latex_parser_renders_reported_eigenvector_derivation",
+        plain_lines(&render_markdown_text(markdown)),
+    );
+}
+
+#[test]
+fn latex_parser_renders_boxed_structures() {
+    let markdown = concat!(
+        "\\[\n",
+        "\\boxed{R_{\\mu\\nu}=\\frac{8\\pi G}{c^4}T_{\\mu\\nu}}\n",
+        "\\]\n\n",
+        "\\[\n",
+        "\\boxed{\\begin{pmatrix}\\frac12&0\\\\0&\\sqrt{x}\\end{pmatrix}}\n",
+        "\\]\n",
+    );
+
+    assert_snapshot!(
+        "latex_parser_renders_boxed_structures",
+        plain_lines(&render_markdown_text(markdown)).join("\n"),
+    );
+}
+
+#[test]
+fn malformed_math_and_literal_dollars_preserve_source() {
+    for markdown in [
+        r"$\unknown{value}$",
+        r"$$\frac{a$$",
+        "Price $5-$10; shell $HOME/$USER",
+    ] {
+        assert_eq!(
+            plain_lines(&render_markdown_text(markdown)).join("\n"),
+            markdown,
+            "{markdown:?}",
+        );
+    }
+}

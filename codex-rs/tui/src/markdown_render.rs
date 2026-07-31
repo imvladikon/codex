@@ -76,11 +76,20 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use url::Url;
 
+mod math;
 mod streaming;
 mod table_key_value;
 
 pub(crate) use streaming::StreamingMarkdownRender;
 pub(crate) use streaming::render_streaming_markdown_lines_with_width_and_cwd;
+
+fn markdown_options() -> Options {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_MATH);
+    options
+}
 
 const TABLE_COLUMN_GAP: usize = 2;
 const TABLE_CELL_PADDING: usize = 1;
@@ -341,11 +350,18 @@ pub(crate) fn render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
     cwd: Option<&Path>,
     is_hidden_link_destination: &dyn Fn(&str) -> bool,
 ) -> Vec<HyperlinkLine> {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_STRIKETHROUGH);
-    options.insert(Options::ENABLE_TABLES);
-    let parser = DecodedTextMerge::new(Parser::new_ext(input, options).into_offset_iter());
-    let mut w = Writer::new(input, parser, width, cwd, is_hidden_link_destination);
+    let normalized = math::normalize_tex_delimiters(input);
+    let parser = DecodedTextMerge::new(
+        Parser::new_ext(&normalized.source, markdown_options()).into_offset_iter(),
+    );
+    let mut w = Writer::new(
+        input,
+        parser,
+        width,
+        cwd,
+        is_hidden_link_destination,
+        normalized.literal_dollar_encoding,
+    );
     w.run();
     w.text
 }
@@ -416,8 +432,9 @@ where
     current_initial_indent: Vec<Span<'static>>,
     current_subsequent_indent: Vec<Span<'static>>,
     current_line_style: Style,
-    current_line_in_code_block: bool,
+    current_line_skip_wrap: bool,
     table_state: Option<TableState>,
+    literal_dollar_encoding: math::LiteralDollarEncoding,
 }
 
 impl<'a, 'policy, I> Writer<'a, 'policy, I>
@@ -430,6 +447,7 @@ where
         wrap_width: Option<usize>,
         cwd: Option<&Path>,
         is_hidden_link_destination: &'policy dyn Fn(&str) -> bool,
+        literal_dollar_encoding: math::LiteralDollarEncoding,
     ) -> Self {
         Self {
             input,
@@ -457,8 +475,9 @@ where
             current_initial_indent: Vec::new(),
             current_subsequent_indent: Vec::new(),
             current_line_style: Style::default(),
-            current_line_in_code_block: false,
+            current_line_skip_wrap: false,
             table_state: None,
+            literal_dollar_encoding,
         }
     }
 
@@ -474,8 +493,13 @@ where
         match event {
             Event::Start(tag) => self.start_tag(tag, range),
             Event::End(tag) => self.end_tag(tag),
-            Event::Text(text) => self.text(text),
+            Event::Text(text) => self.text(math::restore_literal_dollars(
+                text,
+                self.literal_dollar_encoding,
+            )),
             Event::Code(code) => self.code(code),
+            Event::InlineMath(source) => self.inline_math(source, range),
+            Event::DisplayMath(source) => self.display_math(source, range),
             Event::SoftBreak => self.soft_break(),
             Event::HardBreak => self.hard_break(),
             Event::Rule => {
@@ -514,7 +538,7 @@ where
         match tag {
             Tag::Paragraph => self.start_paragraph(),
             Tag::Heading { level, .. } => self.start_heading(level),
-            Tag::BlockQuote => self.start_blockquote(),
+            Tag::BlockQuote(_) => self.start_blockquote(),
             Tag::CodeBlock(kind) => {
                 let indent = match kind {
                     CodeBlockKind::Fenced(_) => None,
@@ -1878,7 +1902,7 @@ where
         if let Some(mut line) = self.current_line_content.take() {
             let style = self.current_line_style;
             // NB we don't wrap code in code blocks, in order to preserve whitespace for copy/paste.
-            if !self.current_line_in_code_block
+            if !self.current_line_skip_wrap
                 && let Some(width) = self.wrap_width
             {
                 let opts = RtOptions::new(width)
@@ -1904,7 +1928,7 @@ where
             }
             self.current_initial_indent.clear();
             self.current_subsequent_indent.clear();
-            self.current_line_in_code_block = false;
+            self.current_line_skip_wrap = false;
             self.line_ends_with_local_link_target = false;
         }
     }
@@ -1955,7 +1979,7 @@ where
         self.current_subsequent_indent = self.prefix_spans(/*pending_marker_line*/ false);
         self.current_line_style = style;
         self.current_line_content = Some(HyperlinkLine::new(line));
-        self.current_line_in_code_block = self.in_code_block;
+        self.current_line_skip_wrap = self.in_code_block;
         self.line_ends_with_local_link_target = false;
 
         self.pending_marker_line = false;
@@ -2479,6 +2503,7 @@ mod tests {
             /*wrap_width*/ Some(80),
             /*cwd*/ None,
             &never_hide_link_destination,
+            math::LiteralDollarEncoding::Unchanged,
         );
         let wrapped = writer.wrap_cell(&cell, /*width*/ 40);
         let rendered = wrapped

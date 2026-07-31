@@ -126,10 +126,14 @@ pub(crate) fn render_streaming_markdown_agent_with_links_and_cwd(
         // Fence unwrapping removes opening/closing lines. A normalized tail that is still a raw
         // suffix necessarily begins after those removed lines, so its boundary can safely be
         // mapped back to the raw source; otherwise leave the transformed block mutable.
-        rendered.last_top_level_block_start = rendered
-            .last_top_level_block_start
-            .and_then(|boundary| markdown_source.strip_suffix(&normalized[boundary..]))
-            .map(str::len);
+        for boundary in [
+            &mut rendered.last_top_level_block_start,
+            &mut rendered.unclosed_math_start,
+        ] {
+            *boundary = (*boundary)
+                .and_then(|boundary| markdown_source.strip_suffix(&normalized[boundary..]))
+                .map(str::len);
+        }
     }
     rendered
 }
@@ -557,5 +561,15 @@ mod tests {
         let src = "```markdown\n| A | B |\n\n|---|---|\n| 1 | 2 |\n```\n";
         let rendered = unwrap_markdown_fences(src);
         assert_eq!(rendered, src);
+    }
+
+    #[test]
+    fn streaming_math_offset_maps_back_after_unwrapped_markdown_fence() {
+        let src = "```md\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n\nIncomplete formula \\(x";
+        let rendered = render_streaming_markdown_agent_with_links_and_cwd(
+            src, /*width*/ None, /*cwd*/ None,
+        );
+
+        assert_eq!(rendered.unclosed_math_start, src.find("Incomplete formula"),);
     }
 }

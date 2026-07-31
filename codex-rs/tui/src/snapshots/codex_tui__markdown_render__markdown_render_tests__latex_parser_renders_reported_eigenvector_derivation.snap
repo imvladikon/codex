@@ -1,0 +1,10 @@
+---
+source: tui/src/markdown_render_tests.rs
+expression: plain_lines(&render_markdown_text(markdown))
+---
+[
+    "Для λ₁ = 1:",
+    "",
+    "                 ⎛1  1⎞⎛x⎞",
+    "(A − I)v = 0  ⟹  ⎝1  1⎠⎝y⎠ = 0,",
+]
